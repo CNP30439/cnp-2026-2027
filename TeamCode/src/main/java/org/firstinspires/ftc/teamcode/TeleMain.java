@@ -97,11 +97,11 @@ public class TeleMain extends OpMode {
     private DcMotorEx leftShooter, rightShooter;
 
     private static final double SHOOTER_P       = 1.5;
-    private static final double SHOOTER_F_LEFT  = 12.77;
+    private static final double SHOOTER_F_LEFT  = 15;
     private static final double SHOOTER_F_RIGHT = 12.77;
     private GoBildaPrismDriver prism;
 
-    private double shooterHighVelocity = 1500;
+    private double shooterHighVelocity = 2250;
     private double shooterLowVelocity  = 1500;
     private static final double VELOCITY_STEP = 100;
     private static final double VELOCITY_MIN  = 0;
@@ -112,8 +112,8 @@ public class TeleMain extends OpMode {
     // Boost ramps from 0 -> BOOST_MAX over BOOST_RAMP_SECS (0.2s), and back
     // down over the same time once R2 is released.
     private double shooterBoost = 0;
-    private static final double BOOST_MAX       = 550;
-    private static final double BOOST_RAMP_SECS = 0.2;
+    private static final double BOOST_MAX       = 0;
+    private static final double BOOST_RAMP_SECS = 0;
     private static final double BOOST_RATE      = BOOST_MAX / BOOST_RAMP_SECS; // 2750 ticks/sec²
     private final ElapsedTime boostTimer = new ElapsedTime();
 
@@ -123,8 +123,8 @@ public class TeleMain extends OpMode {
 
     // ── Linkage ──────────────────────────────────────────────────────────────
     private Servo linkageLeft, linkageRight;
-    private static final double LINKAGE_DOWN = 0.0;
-    private static final double LINKAGE_UP   = 1.0;
+    private static final double LINKAGE_DOWN = 0;
+    private static final double LINKAGE_UP   = .5;
     private boolean linkageUp = false;
     private int currentArtboardState = -1;
 
@@ -220,6 +220,7 @@ public class TeleMain extends OpMode {
 
         linkageLeft  = hardwareMap.get(Servo.class, "linkageleft");
         linkageRight = hardwareMap.get(Servo.class, "linkageright");
+        linkageRight.setDirection(Servo.Direction.REVERSE);   // <-- add this
         linkageUp = false;
         setLinkagePosition(LINKAGE_DOWN);
 
