@@ -1,7 +1,7 @@
-package org.firstinspires.ftc.teamcode;
+package org.firstinspires.ftc.teamcode.TeleOps;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  TeleMain.java  —  TeleOp. Driving goes through Pedro Pathing (position hold
+//  AutoShootDodge.java  —  TeleOp. Driving goes through Pedro Pathing (position hold
 //                    when idle + hold-R2 auto-drive to a fixed pose). Shooter,
 //                    intake, servos and sensor are plain hardware.
 //
@@ -23,21 +23,25 @@ package org.firstinspires.ftc.teamcode;
 //    The choice shows in telemetry. Default is RED.
 //    Each side has TWO presets (0 and 1). Each preset has its own
 //    shooting pose (R2 auto-drive target) and its own reset pose (X button).
-//    Preset 0 is the one you start on. Gamepad 1 L2 (press) toggles 0 <-> 1.
+//    Preset 0 is the one you start on. Gamepad 1 B (press) toggles 0 <-> 1.
 //    Fill in the coordinates in the RED_* / BLUE_* arrays below.
 //
 //  CONTROLS
 //    Gamepad 1
 //      left stick        — drive / strafe
 //      right stick X     — rotate
-//      L2 (press)        — switch preset (changes BOTH the shooting pose and
+//      B (press)         — switch preset (changes BOTH the shooting pose and
 //                          the reset pose for the chosen alliance).
 //      R2 (hold)         — auto-drive to the current shooting pose (turns
-//                          while it moves). Release R2 or move a stick to cancel.
+//                          while it moves). Release R2 to cancel / take back control.
 //      X                 — reset pose to the current reset pose (robot on the
 //                          reset spot, facing the same way). Ignored while aligning.
-//      After R2 arrives  — Pedro holds the target position until you move a
-//                          stick. Otherwise there is NO position hold.
+//      After R2 arrives  — Pedro holds the target position while R2 is held.
+//                          Release R2 and you drive normally (no position hold).
+//                          AUTO-SHOOT: once it arrives, the robot also starts the
+//                          same shoot sequence as gamepad 2 R2 (below) for as long
+//                          as you keep holding R2. The shooter must already be on
+//                          (gamepad 2 dpad up).
 //
 //    Gamepad 2
 //      dpad up           — toggle shooter on / off
@@ -84,6 +88,15 @@ package org.firstinspires.ftc.teamcode;
 //    Left/right bumper nudge the current HIGH or LOW target by VELOCITY_STEP.
 //    While R2 is held, shooter also gets a boost ramping up to +BOOST_MAX
 //    ticks/sec over BOOST_RAMP_SECS (0.2s), ramping back down on release.
+//    STRUCTURE DODGING: the R2 auto-drive avoids the two rectangles in
+//    KEEP_OUT_ZONES, staying ROBOT_MARGIN (7 in, pose is the robot center) away
+//    from their edges. If the straight line is clear it drives straight; if not
+//    it follows one continuous rounded path around the structures (or between them), checked
+//    against the margin before it is used. Rectangles left as {0,0,0,0} are
+//    ignored until you fill in the coordinates.
+//    GAME RAMP: from PLAY, the commanded velocity also creeps up linearly by
+//    GAME_RAMP_EXTRA (25) over GAME_RAMP_SECS (120 s), so 1250 -> 1275 across
+//    the full 2 minutes, then holds at +25.
 //
 //  VOLTAGE / CURRENT MONITORING
 //    Voltage is per-hub only; current is per DcMotorEx only.
@@ -112,13 +125,19 @@ import com.pedropathing.ivy.Scheduler;
 import com.pedropathing.math.Pose;
 import com.pedropathing.paths.Path;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import static com.pedropathing.api.Paths.curve;
 import static com.pedropathing.api.Paths.line;
+import static com.pedropathing.api.Paths.path;
 import static com.pedropathing.ivy.Scheduler.schedule;
 import static com.pedropathing.ivy.pedro.PedroCommands.follow;
 import static com.pedropathing.ivy.pedro.PedroCommands.hold;
 
-@TeleOp(name = "TeleMain", group = "TeleOp")
-public class TeleMain extends OpMode {
+@TeleOp(name = "AutoShootDodge", group = "TeleOp")
+public class AutoShootDodge extends OpMode {
 
     // ── Drive ────────────────────────────────────────────────────────────────
     // Pedro's follower owns the four drive motors (names/directions are set in
@@ -141,29 +160,26 @@ public class TeleMain extends OpMode {
     // TODO: fill in the real coordinates. Preset 0 currently holds the old
     // values as a stand-in, preset 1 is empty (0, 0, 0).
     public static final Pose[] RED_SHOOT_POSES = {
-            p.of(56, 14, -90),   // TODO RED preset 0 shooting pose
-            p.of(56, 130, 90)        // TODO RED preset 1 shooting pose (empty)
+            p.of(56, 14, -90),   // RED preset 0 shooting pose
+            p.of(56, 130, 90)    // RED preset 1 shooting pose
     };
     public static final Pose[] RED_RESET_POSES = {
-            p.of(8, 9, -90),      // TODO RED preset 0 reset pose
-            p.of(8, 135, 90)        // TODO RED preset 1 reset pose (empty)
+            p.of(8, 9, -90),     // RED preset 0 reset pose
+            p.of(8, 135, 90)     // RED preset 1 reset pose
     };
 
     public static final Pose[] BLUE_SHOOT_POSES = {
-            p.of(83, 14, -90),   // TODO BLUE preset 0 shooting pose
-            p.of(83, 130, 90)        // TODO BLUE preset 1 shooting pose (empty)
+            p.of(83, 14, -90),   // BLUE preset 0 shooting pose
+            p.of(83, 130, 90)    // BLUE preset 1 shooting pose
     };
     public static final Pose[] BLUE_RESET_POSES = {
-            p.of(136, 9, -90),      // TODO BLUE preset 0 reset pose
-            p.of(136, 135, 90)        // TODO BLUE preset 1 reset pose (empty)
+            p.of(136, 9, -90),   // BLUE preset 0 reset pose
+            p.of(136, 135, 90)   // BLUE preset 1 reset pose
     };
 
     private Alliance alliance    = Alliance.RED;
-    private int      presetIndex = 0;       // 0 or 1, toggled by gamepad 1 L2
-    private boolean  lastL2      = false;
-
-    // Stick movement past this cancels an in-progress alignment.
-    private static final double STICK_ABORT_THRESHOLD = 0.15;
+    private int      presetIndex = 0;       // 0 or 1, toggled by gamepad 1 B
+    private boolean  lastPresetBtn = false;
 
     private AlignState alignState    = AlignState.MANUAL;
     private boolean    alignWasHeld  = false;   // gamepad1 R2 last tick
@@ -175,17 +191,51 @@ public class TeleMain extends OpMode {
     // pressed so pressing L2 mid-align can't make the path and hold disagree.
     private Pose       alignTarget   = RED_SHOOT_POSES[0];
 
+    // ── Structure dodging ────────────────────────────────────────────────────
+    // The field has TWO structures to avoid. Each is a rectangle in field inches:
+    //     { minX, minY, maxX, maxY }
+    // The auto-drive checks its straight line to the shooting pose against both.
+    // If the line would clip one, it plans a detour around the (padded) corners
+    // instead. A rectangle left as {0, 0, 0, 0} is ignored, so the drive is
+    // unchanged until you fill them in.
+    //
+    // TODO: fill in the real coordinates for both structures.
+    public static final double[][] KEEP_OUT_ZONES = {
+            {45, 50, 49, 91},   // STRUCTURE 1  {minX, minY, maxX, maxY}
+            {91, 50, 96, 91}    // STRUCTURE 2  {minX, minY, maxX, maxY}
+    };
+
+    // The robot pose is its CENTER, so it must stay at least this far from the
+    // edge of any structure.
+    private static final double ROBOT_MARGIN = 7.0;
+
+    // When the straight line is blocked the robot follows one continuous, smooth
+    // path (Paths.path of lines + curves): straight runs joined by rounded corners, so it
+    // sweeps around a structure (or squeezes between the two) without stopping.
+    // CORNER_RADIUS is how far before/after each corner the rounding starts. The
+    // finished path is sampled and checked against ROBOT_MARGIN; if a rounded
+    // corner cuts too close, the corner is pushed out by PAD_STEP and re-checked.
+    private static final double CORNER_RADIUS = 10.0;
+    private static final int    CURVE_SAMPLES = 20;     // per segment
+    private static final double PAD_STEP      = 1.5;
+    private static final int    PAD_TRIES     = 10;
+    private static final double FIELD_MIN    = 0;
+    private static final double FIELD_MAX    = 144;
+
+    // How many detour guide points the current auto-drive curve bends around (0 = straight).
+    private int routeCorners = 0;
+
     // ── Shooter ──────────────────────────────────────────────────────────────
     private DcMotorEx leftShooter, rightShooter;
 
     private static final double SHOOTER_P       = 1.5;
-    private static final double SHOOTER_F_LEFT  = 15;
-    private static final double SHOOTER_F_RIGHT = 12.77;
+    private static final double SHOOTER_F_LEFT  = 18.3237;
+    private static final double SHOOTER_F_RIGHT = 18.3237;
     private GoBildaPrismDriver prism;
 
-    private double shooterHighVelocity = 2250;
-    private double shooterLowVelocity  = 1500;
-    private static final double VELOCITY_STEP = 100;
+    private double shooterHighVelocity = 1250;
+    private double shooterLowVelocity  = 1250;
+    private static final double VELOCITY_STEP = 50;
     private static final double VELOCITY_MIN  = 0;
 
     private boolean shooterOn   = false;
@@ -198,6 +248,14 @@ public class TeleMain extends OpMode {
     private static final double BOOST_RAMP_SECS = 0;
     private static final double BOOST_RATE      = BOOST_MAX / BOOST_RAMP_SECS; // 2750 ticks/sec²
     private final ElapsedTime boostTimer = new ElapsedTime();
+
+    // Game-long ramp: the shooter target creeps up linearly from the HIGH/LOW
+    // target (1250) to 1275 over the full 2-minute TeleOp, starting at PLAY.
+    // It is added on top of the target, so bumper trims still work.
+    private static final double GAME_RAMP_SECS    = 120;   // full 2 min
+    private static final double GAME_RAMP_EXTRA   = 25;    // 1250 -> 1275
+    private final ElapsedTime gameTimer = new ElapsedTime();
+    private double gameRamp = 0;
 
     // ── Intake ───────────────────────────────────────────────────────────────
     private DcMotorEx leftIntake, rightIntake;
@@ -277,7 +335,7 @@ public class TeleMain extends OpMode {
         follower = Constants.create(hardwareMap);
         alliance    = Alliance.RED;
         presetIndex = 0;
-        lastL2      = false;
+        lastPresetBtn = false;
         follower.setPose(originPose());
         alignTarget  = idealPose();
         alignState   = AlignState.MANUAL;
@@ -362,6 +420,7 @@ public class TeleMain extends OpMode {
         // Lock in the chosen side's starting pose.
         follower.setPose(originPose());
         alignTarget = idealPose();
+        gameTimer.reset();   // game-long shooter ramp starts at PLAY
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -374,9 +433,9 @@ public class TeleMain extends OpMode {
 
         // ── Preset toggle (gamepad 1 L2) ─────────────────────────────────────
         // Switches BOTH the shooting pose and the reset pose for this alliance.
-        boolean l2 = gamepad1.left_trigger > TRIGGER_THRESHOLD;
-        if (l2 && !lastL2) presetIndex = 1 - presetIndex;
-        lastL2 = l2;
+        boolean presetBtn = gamepad1.b;
+        if (presetBtn && !lastPresetBtn) presetIndex = 1 - presetIndex;
+        lastPresetBtn = presetBtn;
 
         // ── Drive ────────────────────────────────────────────────────────────
         double stickY  = -gamepad1.left_stick_y;
@@ -388,7 +447,7 @@ public class TeleMain extends OpMode {
         if (Math.abs(stickRx) < DRIVE_DEADZONE) stickRx = 0;
 
         // Gamepad 1: X resets pose, R2 starts/cancels auto-align.
-        updateAlign(Math.max(Math.abs(stickY), Math.max(Math.abs(stickX), Math.abs(stickRx))));
+        updateAlign();
 
         if (driverHasControl()) {
             // Pedro: +lateral = left, +turn = counterclockwise. Sticks are
@@ -419,7 +478,13 @@ public class TeleMain extends OpMode {
         lastDpadLeft  = dLeft;
         lastDpadDown  = dDown;
 
-        boolean shooting = gamepad2.right_trigger > TRIGGER_THRESHOLD;
+        // Shoot when gamepad 2 R2 is held, OR automatically once the robot has
+        // arrived at the shooting pose with gamepad 1 R2 still held (ARRIVED only
+        // lasts while gamepad 1 R2 is down). Everything below (hood, kicker delay,
+        // blocker, intake feed) keys off this one flag, so auto-shoot behaves
+        // exactly like a gamepad 2 R2 press.
+        boolean shooting = gamepad2.right_trigger > TRIGGER_THRESHOLD
+                || alignState == AlignState.ARRIVED;
 
         // ── Hood ─────────────────────────────────────────────────────────────
         hood.setPosition(shooting ? HOOD_LOWEST : HOOD_START);
@@ -462,7 +527,10 @@ public class TeleMain extends OpMode {
             shooterBoost = Math.max(boostTarget, shooterBoost - BOOST_RATE * boostDt);
         }
 
-        double commandedVelocity = shooterOn ? (shooterVelocity + shooterBoost) : 0;
+        // Slow game-long ramp: 0 -> GAME_RAMP_EXTRA over GAME_RAMP_SECS, then holds.
+        gameRamp = GAME_RAMP_EXTRA * Math.min(1.0, gameTimer.seconds() / GAME_RAMP_SECS);
+
+        double commandedVelocity = shooterOn ? (shooterVelocity + shooterBoost + gameRamp) : 0;
         leftShooter.setVelocity(commandedVelocity);
         rightShooter.setVelocity(commandedVelocity);
 
@@ -525,6 +593,7 @@ public class TeleMain extends OpMode {
                 shooterMode, shooterVelocity, shooterBoost, commandedVelocity,
                 leftShooter.getVelocity(), rightShooter.getVelocity());
         telemetry.addData("Shooter HIGH/LOW targets", "%.0f / %.0f", shooterHighVelocity, shooterLowVelocity);
+        telemetry.addData("Game ramp", "+%.1f ticks/sec  (%.0f s elapsed)", gameRamp, gameTimer.seconds());
         telemetry.addData("Shooting (R2)", shooting ? "YES" : "no");
         if (shooting) {
             telemetry.addData("Kick delay", "%.0f / %d ms  %s",
@@ -543,6 +612,8 @@ public class TeleMain extends OpMode {
         telemetry.addData("Align", "%s  busy=%b  mode=%s", alignState, follower.isBusy(), follower.mode());
         telemetry.addData("Pose", "x=%.1f  y=%.1f  heading=%.0f deg", pose.x(), pose.y(), Math.toDegrees(pose.heading()));
         telemetry.addData("Distance to target", "%.1f in", distanceToTarget());
+        telemetry.addData("Route", alignState == AlignState.MANUAL ? "-" :
+                (routeCorners > 0 ? "curving around structures (" + routeCorners + " guide pts)" : "straight"));
 
 
         telemetry.update();
@@ -579,10 +650,10 @@ public class TeleMain extends OpMode {
      * drivetrain at a time:
      *   MANUAL   — driver (plain stick drive, no position hold)
      *   ALIGNING — Ivy is driving the path
-     *   ARRIVED  — path done; Pedro holds the target until a stick moves.
-     *              Press R2 again to drive to the target again.
+     *   ARRIVED  — path done; Pedro holds the target while R2 stays held.
+     *              Release R2 to get driver control back.
      */
-    private void updateAlign(double stickMag) {
+    private void updateAlign() {
         // X: reset pose once per press, only while the driver has control.
         boolean xHeld = gamepad1.x;
         if (xHeld && !resetWasHeld && driverHasControl()) {
@@ -600,15 +671,15 @@ public class TeleMain extends OpMode {
                 // Only a fresh press starts an alignment.
                 if (rising) {
                     alignTarget = idealPose();
-                    schedule(follow(follower, pathTo(alignTarget)));
+                    scheduleRoute(alignTarget);
                     alignStarted = false;
                     alignState = AlignState.ALIGNING;
                 }
                 break;
 
             case ALIGNING:
-                if (!alignHeld || stickMag > STICK_ABORT_THRESHOLD) {
-                    // Driver let go or grabbed the sticks.
+                if (!alignHeld) {
+                    // Driver let go of R2: hand control straight back.
                     Scheduler.reset();   // clears ALL scheduled Ivy commands
                     alignState = AlignState.MANUAL;
                 } else if (follower.isBusy()) {
@@ -622,18 +693,11 @@ public class TeleMain extends OpMode {
                 break;
 
             case ARRIVED:
-                // Pedro is holding the target. Any stick movement hands control
-                // back to the driver (stickMag is already past DRIVE_DEADZONE).
-                if (stickMag > 0) {
+                // Pedro holds the target for as long as R2 stays held.
+                // Releasing R2 hands control back to the driver.
+                if (!alignHeld) {
                     Scheduler.reset();   // stops the hold
                     alignState = AlignState.MANUAL;
-                } else if (rising) {
-                    // R2 pressed again: drive to the (possibly new) target.
-                    Scheduler.reset();
-                    alignTarget = idealPose();
-                    schedule(follow(follower, pathTo(alignTarget)));
-                    alignStarted = false;
-                    alignState = AlignState.ALIGNING;
                 }
                 break;
         }
@@ -644,14 +708,266 @@ public class TeleMain extends OpMode {
         return alignState == AlignState.MANUAL;
     }
 
-    /**
-     * Straight line from the robot's current pose to the given target. .linear()
-     * turns the heading steadily while it drives, so the robot rotates to the
-     * target heading as it moves.
-     */
+    /** Straight line from the robot's current pose to the given target (heading turns as it drives). */
     private Path pathTo(Pose target) {
         Pose currentPose = follower.pose();
         return line(currentPose, target).linear(currentPose, target);
+    }
+
+    /**
+     * Schedules the drive to the target. Straight if the way is clear; otherwise
+     * one continuous rounded path around (or between) the structures.
+     */
+    private void scheduleRoute(Pose target) {
+        Pose start = follower.pose();
+        routeCorners = 0;
+        if (isBlocked(start.x(), start.y(), target.x(), target.y())) {
+            Path route = buildCurvedPath(start, target);
+            if (route != null) {
+                schedule(follow(follower, route));
+                return;
+            }
+        }
+        schedule(follow(follower, pathTo(target)));   // clear, or no safe route: straight
+    }
+
+    /**
+     * Builds the dodge path: lines joined by quadratic-Bezier rounded corners,
+     * with the heading turning steadily from the current heading to the target's.
+     * Returns null if no safe route exists.
+     */
+    private Path buildCurvedPath(Pose start, Pose target) {
+        double pad = ROBOT_MARGIN + CORNER_RADIUS * 0.5;   // rounding cuts in by at most ~R/2
+        for (int attempt = 0; attempt < PAD_TRIES; attempt++, pad += PAD_STEP) {
+            List<double[]> corners = findCorners(start, target, pad);
+            if (corners == null || corners.isEmpty()) return null;
+
+            List<double[]> pts = new ArrayList<>();
+            pts.add(new double[]{start.x(), start.y()});
+            pts.addAll(corners);
+            pts.add(new double[]{target.x(), target.y()});
+
+            List<double[][]> segs = roundedSegments(pts);
+            if (!segmentsClear(segs, start, target)) continue;   // cut too close: widen, retry
+
+            // Heading: spread the turn along the path in proportion to distance.
+            double h0    = start.heading();
+            double delta = Math.atan2(Math.sin(target.heading() - h0), Math.cos(target.heading() - h0));
+            double total = 0;
+            for (double[][] sg : segs) total += controlLength(sg);
+
+            List<Path> parts = new ArrayList<>();
+            double run = 0;
+            for (double[][] sg : segs) {
+                double len = controlLength(sg);
+                double hA = h0 + delta * (run / total);
+                double hB = h0 + delta * ((run + len) / total);
+                run += len;
+
+                Pose a = p.of(sg[0][0], sg[0][1], Math.toDegrees(hA));
+                Pose b = p.of(sg[sg.length - 1][0], sg[sg.length - 1][1], Math.toDegrees(hB));
+                if (sg.length == 2) {
+                    parts.add(line(a, b).linear(a, b));
+                } else {
+                    Pose m = p.of(sg[1][0], sg[1][1], Math.toDegrees(hA));   // corner = control point
+                    parts.add(curve(a, m, b).linear(a, b));
+                }
+            }
+            routeCorners = corners.size();
+            return path(parts.toArray(new Path[0]));
+        }
+        return null;
+    }
+
+    /**
+     * Turns the polyline start -> corners -> target into segments: straight runs
+     * (2 points) and rounded corners (3 points: entry, corner as control, exit).
+     */
+    private List<double[][]> roundedSegments(List<double[]> pts) {
+        List<double[][]> out = new ArrayList<>();
+        double[] cur = pts.get(0);
+        for (int k = 1; k < pts.size() - 1; k++) {
+            double[] a = pts.get(k - 1), c = pts.get(k), b = pts.get(k + 1);
+            double lenIn  = Math.hypot(c[0] - a[0], c[1] - a[1]);
+            double lenOut = Math.hypot(b[0] - c[0], b[1] - c[1]);
+            double rIn  = Math.min(CORNER_RADIUS, lenIn  / 2);
+            double rOut = Math.min(CORNER_RADIUS, lenOut / 2);
+            double[] entry = {c[0] - (c[0] - a[0]) / lenIn * rIn,  c[1] - (c[1] - a[1]) / lenIn * rIn};
+            double[] exit  = {c[0] + (b[0] - c[0]) / lenOut * rOut, c[1] + (b[1] - c[1]) / lenOut * rOut};
+            if (Math.hypot(entry[0] - cur[0], entry[1] - cur[1]) > 0.01) {
+                out.add(new double[][]{cur, entry});
+            }
+            out.add(new double[][]{entry, c, exit});
+            cur = exit;
+        }
+        out.add(new double[][]{cur, pts.get(pts.size() - 1)});
+        return out;
+    }
+
+    private static double controlLength(double[][] sg) {
+        double len = 0;
+        for (int i = 1; i < sg.length; i++) {
+            len += Math.hypot(sg[i][0] - sg[i - 1][0], sg[i][1] - sg[i - 1][1]);
+        }
+        return len;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  Structure dodging — route planner
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Picks which padded zone corners the robot should wrap around, in order.
+     * Visibility graph over start, target and every usable corner, shortest path
+     * by Dijkstra. Because both rectangles' corners are in the graph, the route
+     * goes between the two structures whenever the gap is wide enough.
+     * Returns null if no route exists.
+     */
+    private List<double[]> findCorners(Pose start, Pose target, double pad) {
+        // Node 0 = start, node 1 = target, then every usable padded corner.
+        List<double[]> nodes = new ArrayList<>();
+        nodes.add(new double[]{start.x(),  start.y()});
+        nodes.add(new double[]{target.x(), target.y()});
+        for (double[] z : KEEP_OUT_ZONES) {
+            if (!active(z)) continue;
+            double[][] corners = {
+                    {z[0] - pad, z[1] - pad},
+                    {z[2] + pad, z[1] - pad},
+                    {z[2] + pad, z[3] + pad},
+                    {z[0] - pad, z[3] + pad}
+            };
+            for (double[] c : corners) {
+                boolean onField = c[0] >= FIELD_MIN && c[0] <= FIELD_MAX
+                        && c[1] >= FIELD_MIN && c[1] <= FIELD_MAX;
+                if (onField && !insideAnyZone(c[0], c[1])) nodes.add(c);
+            }
+        }
+
+        int n = nodes.size();
+        double[] dist = new double[n];
+        int[] prev = new int[n];
+        boolean[] done = new boolean[n];
+        java.util.Arrays.fill(dist, Double.MAX_VALUE);
+        java.util.Arrays.fill(prev, -1);
+        dist[0] = 0;
+        for (int iter = 0; iter < n; iter++) {
+            int u = -1;
+            for (int i = 0; i < n; i++) {
+                if (!done[i] && dist[i] < Double.MAX_VALUE && (u == -1 || dist[i] < dist[u])) u = i;
+            }
+            if (u == -1) break;
+            done[u] = true;
+            for (int v = 0; v < n; v++) {
+                if (done[v]) continue;
+                double[] a = nodes.get(u), b = nodes.get(v);
+                if (isBlocked(a[0], a[1], b[0], b[1])) continue;
+                double d = dist[u] + Math.hypot(b[0] - a[0], b[1] - a[1]);
+                if (d < dist[v]) { dist[v] = d; prev[v] = u; }
+            }
+        }
+        if (dist[1] == Double.MAX_VALUE) return null;
+
+        List<Integer> chain = new ArrayList<>();
+        for (int at = 1; at != -1; at = prev[at]) chain.add(at);
+        Collections.reverse(chain);          // 0 (start) ... 1 (target)
+        List<double[]> out = new ArrayList<>();
+        for (int i = 1; i < chain.size() - 1; i++) out.add(nodes.get(chain.get(i)));
+        return out;
+    }
+
+    /**
+     * Samples every segment of the planned path and checks it never comes within
+     * ROBOT_MARGIN of a structure. A zone that already holds the start or target
+     * is skipped so the robot can always drive out of it.
+     */
+    private boolean segmentsClear(List<double[][]> segs, Pose start, Pose target) {
+        final double eps = 0.01;
+        for (double[][] sg : segs) {
+            for (int i = 0; i <= CURVE_SAMPLES; i++) {
+                double[] pt = bezierPoint(sg, (double) i / CURVE_SAMPLES);
+                for (double[] z : KEEP_OUT_ZONES) {
+                    if (!active(z)) continue;
+                    double x0 = z[0] - ROBOT_MARGIN + eps, y0 = z[1] - ROBOT_MARGIN + eps;
+                    double x1 = z[2] + ROBOT_MARGIN - eps, y1 = z[3] + ROBOT_MARGIN - eps;
+                    if (inside(start.x(),  start.y(),  x0, y0, x1, y1)
+                            || inside(target.x(), target.y(), x0, y0, x1, y1)) continue;
+                    if (inside(pt[0], pt[1], x0, y0, x1, y1)) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** Point on a Bezier segment (2 or 3 control points) at t in [0,1], by de Casteljau. */
+    private static double[] bezierPoint(double[][] ctrl, double t) {
+        int n = ctrl.length;
+        double[] x = new double[n], y = new double[n];
+        for (int i = 0; i < n; i++) { x[i] = ctrl[i][0]; y[i] = ctrl[i][1]; }
+        for (int k = n - 1; k > 0; k--) {
+            for (int i = 0; i < k; i++) {
+                x[i] = (1 - t) * x[i] + t * x[i + 1];
+                y[i] = (1 - t) * y[i] + t * y[i + 1];
+            }
+        }
+        return new double[]{x[0], y[0]};
+    }
+
+    /** True if the segment a-b passes through any padded keep-out zone. */
+    private boolean isBlocked(double ax, double ay, double bx, double by) {
+        final double eps = 0.01;   // so points exactly on a padded edge count as outside
+        for (double[] z : KEEP_OUT_ZONES) {
+            if (!active(z)) continue;
+            double x0 = z[0] - ROBOT_MARGIN + eps, y0 = z[1] - ROBOT_MARGIN + eps;
+            double x1 = z[2] + ROBOT_MARGIN - eps, y1 = z[3] + ROBOT_MARGIN - eps;
+            // If an end is already inside this zone (robot hugging it, or target
+            // inside it) don't let that zone block the leg, or we could never leave.
+            if (inside(ax, ay, x0, y0, x1, y1) || inside(bx, by, x0, y0, x1, y1)) continue;
+            if (segmentHitsRect(ax, ay, bx, by, x0, y0, x1, y1)) return true;
+        }
+        return false;
+    }
+
+    private boolean insideAnyZone(double x, double y) {
+        final double eps = 0.01;
+        for (double[] z : KEEP_OUT_ZONES) {
+            if (!active(z)) continue;
+            if (inside(x, y, z[0] - ROBOT_MARGIN + eps, z[1] - ROBOT_MARGIN + eps,
+                    z[2] + ROBOT_MARGIN - eps, z[3] + ROBOT_MARGIN - eps)) return true;
+        }
+        return false;
+    }
+
+    /** A zone still left as {0,0,0,0} is a placeholder and is ignored. */
+    private static boolean active(double[] z) {
+        return !(z[0] == 0 && z[1] == 0 && z[2] == 0 && z[3] == 0);
+    }
+
+    private static boolean inside(double x, double y, double x0, double y0, double x1, double y1) {
+        return x > x0 && x < x1 && y > y0 && y < y1;
+    }
+
+    /** Liang–Barsky segment vs. axis-aligned rectangle test. */
+    private static boolean segmentHitsRect(double ax, double ay, double bx, double by,
+                                           double x0, double y0, double x1, double y1) {
+        double t0 = 0, t1 = 1;
+        double dx = bx - ax, dy = by - ay;
+        double[] pp = {-dx, dx, -dy, dy};
+        double[] qq = {ax - x0, x1 - ax, ay - y0, y1 - ay};
+        for (int i = 0; i < 4; i++) {
+            if (pp[i] == 0) {
+                if (qq[i] < 0) return false;
+            } else {
+                double t = qq[i] / pp[i];
+                if (pp[i] < 0) {
+                    if (t > t1) return false;
+                    if (t > t0) t0 = t;
+                } else {
+                    if (t < t0) return false;
+                    if (t < t1) t1 = t;
+                }
+            }
+        }
+        return true;
     }
 
     /** Distance in inches from the robot to the current shooting pose, for telemetry. */
