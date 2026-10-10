@@ -1,8 +1,9 @@
 package org.firstinspires.ftc.teamcode;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  TeleMain.java  —  Plain hardware TeleOp. No Pedro Pathing, no odometry,
-//                    no follower, no NextFTC. Just motors, servos, one sensor.
+//  TeleMain.java  —  TeleOp. Driving goes through Pedro Pathing (position hold
+//                    when idle + hold-R2 auto-drive to a fixed pose). Shooter,
+//                    intake, servos and sensor are plain hardware.
 //
 //  HARDWARE (names must match the Robot Configuration on the Driver Hub)
 //    4x drive motors    — fl, fr, bl, br    (mecanum)
@@ -19,6 +20,12 @@ package org.firstinspires.ftc.teamcode;
 //    Gamepad 1
 //      left stick        — drive / strafe
 //      right stick X     — rotate
+//      R2 (hold)         — auto-drive to IDEAL_POSE (turns while it moves).
+//                          Release R2 or move a stick to cancel.
+//      X                 — reset pose to ORIGIN (robot on the reset spot,
+//                          facing the same way). Ignored while aligning.
+//      After R2 arrives  — Pedro holds the target position until you move a
+//                          stick. Otherwise there is NO position hold.
 //
 //    Gamepad 2
 //      dpad up           — toggle shooter on / off
@@ -85,13 +92,48 @@ import com.qualcomm.robotcore.util.ElapsedTime;
 import org.firstinspires.ftc.robotcore.external.navigation.CurrentUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 import org.firstinspires.ftc.teamcode.Prism.GoBildaPrismDriver;
+import org.firstinspires.ftc.teamcode.pedro.Constants;
+
+import com.pedropathing.api.PoseFactory;
+import com.pedropathing.follower.Follower;
+import com.pedropathing.ivy.Scheduler;
+import com.pedropathing.math.Pose;
+import com.pedropathing.paths.Path;
+
+import static com.pedropathing.api.Paths.line;
+import static com.pedropathing.ivy.Scheduler.schedule;
+import static com.pedropathing.ivy.pedro.PedroCommands.follow;
+import static com.pedropathing.ivy.pedro.PedroCommands.hold;
 
 @TeleOp(name = "TeleMain", group = "TeleOp")
 public class TeleMain extends OpMode {
 
     // ── Drive ────────────────────────────────────────────────────────────────
-    private DcMotorEx frontLeft, frontRight, backLeft, backRight;
+    // Pedro's follower owns the four drive motors (names/directions are set in
+    // pedro/Constants.java), so there are no drive motor objects in this file.
+    private Follower follower;
     private static final double DRIVE_DEADZONE = 0.05;
+
+    // ── Auto-align to a fixed pose (gamepad 1, R2) ───────────────────────────
+    private enum AlignState { MANUAL, ALIGNING, ARRIVED }
+
+    private static final PoseFactory p = PoseFactory.degrees();
+
+    // Reset / starting spot.
+    public static final Pose ORIGIN = p.of(8, 9, 90);
+
+    // Auto-drive target.
+    public static final Pose IDEAL_POSE = p.of(56, 14, -90);
+
+    // Stick movement past this cancels an in-progress alignment.
+    private static final double STICK_ABORT_THRESHOLD = 0.15;
+
+    private AlignState alignState    = AlignState.MANUAL;
+    private boolean    alignWasHeld  = false;   // gamepad1 R2 last tick
+    private boolean    resetWasHeld  = false;   // gamepad1 X last tick
+    // True once the follower has actually become busy after scheduling; stops
+    // the first tick from wrongly jumping to ARRIVED.
+    private boolean    alignStarted  = false;
 
     // ── Shooter ──────────────────────────────────────────────────────────────
     private DcMotorEx leftShooter, rightShooter;
@@ -176,20 +218,14 @@ public class TeleMain extends OpMode {
     @Override
     public void init() {
 
-        frontLeft  = hardwareMap.get(DcMotorEx.class, "fl");
-        frontRight = hardwareMap.get(DcMotorEx.class, "fr");
-        backLeft   = hardwareMap.get(DcMotorEx.class, "bl");
-        backRight  = hardwareMap.get(DcMotorEx.class, "br");
-
-        frontLeft.setDirection(DcMotorSimple.Direction.REVERSE);
-        backLeft.setDirection(DcMotorSimple.Direction.REVERSE);
-        frontRight.setDirection(DcMotorSimple.Direction.FORWARD);
-        backRight.setDirection(DcMotorSimple.Direction.FORWARD);
-
-        for (DcMotor m : new DcMotor[]{frontLeft, frontRight, backLeft, backRight}) {
-            m.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-            m.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
-        }
+        // Drive is handled by Pedro (motors fl/fr/bl/br are configured in Constants).
+        Scheduler.reset();
+        follower = Constants.create(hardwareMap);
+        follower.setPose(ORIGIN);
+        alignState   = AlignState.MANUAL;
+        alignWasHeld = false;
+        resetWasHeld = false;
+        alignStarted = false;
 
         prism = hardwareMap.get(GoBildaPrismDriver.class, "prism");
         prism.loadAnimationsFromArtboard(GoBildaPrismDriver.Artboard.ARTBOARD_0);
@@ -257,19 +293,21 @@ public class TeleMain extends OpMode {
         if (Math.abs(stickX)  < DRIVE_DEADZONE) stickX  = 0;
         if (Math.abs(stickRx) < DRIVE_DEADZONE) stickRx = 0;
 
-        double fl = stickY + stickX + stickRx;
-        double fr = stickY - stickX - stickRx;
-        double bl = stickY - stickX + stickRx;
-        double br = stickY + stickX - stickRx;
+        // Gamepad 1: X resets pose, R2 starts/cancels auto-align.
+        updateAlign(Math.max(Math.abs(stickY), Math.max(Math.abs(stickX), Math.abs(stickRx))));
 
-        double maxPow = Math.max(Math.abs(fl),
-                Math.max(Math.abs(fr), Math.max(Math.abs(bl), Math.abs(br))));
-        if (maxPow > 1.0) { fl /= maxPow; fr /= maxPow; bl /= maxPow; br /= maxPow; }
+        if (driverHasControl()) {
+            // Pedro: +lateral = left, +turn = counterclockwise. Sticks are
+            // positive to the right, so both are negated.
+            double lateral = -stickX;
+            double turn    = -stickRx;
+            // Plain manual drive: no position hold, no extra stick cutoff
+            // beyond DRIVE_DEADZONE, so slow strafing works.
+            follower.manual(stickY, lateral, turn);
+        }
 
-        frontLeft.setPower(fl);
-        frontRight.setPower(fr);
-        backLeft.setPower(bl);
-        backRight.setPower(br);
+        follower.update();
+        Scheduler.execute();
 
         // ── Shooter mode (dpad) ───────────────────────────────────────────────
         boolean dUp    = gamepad2.dpad_up;
@@ -406,32 +444,11 @@ public class TeleMain extends OpMode {
         telemetry.addData("Linkage", linkageUp ? "UP" : "DOWN");
         telemetry.addData("Hood",    "%.2f  (LOWEST=%.2f START=%.2f)", hood.getPosition(), HOOD_LOWEST, HOOD_START);
         telemetry.addLine("---");
-        telemetry.addData("Drive fl/fr", "%.2f / %.2f", fl, fr);
-        telemetry.addData("Drive bl/br", "%.2f / %.2f", bl, br);
+        Pose pose = follower.pose();
+        telemetry.addData("Align", "%s  busy=%b  mode=%s", alignState, follower.isBusy(), follower.mode());
+        telemetry.addData("Pose", "x=%.1f  y=%.1f  heading=%.0f deg", pose.x(), pose.y(), Math.toDegrees(pose.heading()));
+        telemetry.addData("Distance to target", "%.1f in", distanceToTarget());
 
-        telemetry.addLine("--- Voltage / Current ---");
-        double minVoltage = Double.POSITIVE_INFINITY;
-        for (VoltageSensor vs : hardwareMap.voltageSensor) {
-            double v = vs.getVoltage();
-            if (v > 0) minVoltage = Math.min(minVoltage, v);
-            String hubName = String.join("/", hardwareMap.getNamesOf(vs));
-            telemetry.addData("Hub voltage [" + hubName + "]", "%.2f V", v);
-        }
-        String voltageStatus;
-        if      (minVoltage >= VOLTAGE_GOOD_MIN) voltageStatus = "GOOD (should be ~12.0-13.0V fresh)";
-        else if (minVoltage >= VOLTAGE_OK_MIN)   voltageStatus = "OK (normal sag under load)";
-        else if (minVoltage >= VOLTAGE_LOW_MIN)  voltageStatus = "LOW - swap battery soon";
-        else                                      voltageStatus = "CRITICAL - brownout risk!";
-        telemetry.addData("Min battery voltage", "%.2f V  [%s]", minVoltage, voltageStatus);
-
-        telemetry.addData("Drive current fl/fr/bl/br (A)", "%.2f / %.2f / %.2f / %.2f  (expect ~0.5-1A cruising, ~3-4A hard push)",
-                frontLeft.getCurrent(CurrentUnit.AMPS),  frontRight.getCurrent(CurrentUnit.AMPS),
-                backLeft.getCurrent(CurrentUnit.AMPS),   backRight.getCurrent(CurrentUnit.AMPS));
-        telemetry.addData("Intake current li/ri (A)", "%.2f / %.2f",
-                leftIntake.getCurrent(CurrentUnit.AMPS), rightIntake.getCurrent(CurrentUnit.AMPS));
-        telemetry.addData("Shooter current ls/rs (A)", "%.2f / %.2f  (spikes while spinning up are normal)",
-                leftShooter.getCurrent(CurrentUnit.AMPS), rightShooter.getCurrent(CurrentUnit.AMPS));
-        telemetry.addLine("Servos, distance sensor & Prism light: no voltage/current reading exists in the SDK");
 
         telemetry.update();
     }
@@ -441,10 +458,7 @@ public class TeleMain extends OpMode {
     // ═════════════════════════════════════════════════════════════════════════
     @Override
     public void stop() {
-        frontLeft.setPower(0);
-        frontRight.setPower(0);
-        backLeft.setPower(0);
-        backRight.setPower(0);
+        Scheduler.reset();
         leftShooter.setPower(0);
         rightShooter.setPower(0);
         leftIntake.setPower(0);
@@ -458,5 +472,93 @@ public class TeleMain extends OpMode {
     private void setLinkagePosition(double position) {
         linkageLeft.setPosition(position);
         linkageRight.setPosition(position);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  Auto-align to IDEAL_POSE (gamepad 1)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Gamepad 1 X = reset pose to ORIGIN. Gamepad 1 R2 (hold) = auto-drive to
+     * IDEAL_POSE. Only one thing owns the drivetrain at a time:
+     *   MANUAL   — driver (plain stick drive, no position hold)
+     *   ALIGNING — Ivy is driving the path
+     *   ARRIVED  — path done; Pedro holds the target until a stick moves.
+     *              Press R2 again to drive to the target again.
+     */
+    private void updateAlign(double stickMag) {
+        // X: reset pose once per press, only while the driver has control.
+        boolean xHeld = gamepad1.x;
+        if (xHeld && !resetWasHeld && driverHasControl()) {
+            follower.setPose(ORIGIN);
+        }
+        resetWasHeld = xHeld;
+
+        boolean alignHeld = gamepad1.right_trigger > TRIGGER_THRESHOLD;
+        boolean rising    = alignHeld && !alignWasHeld;
+        alignWasHeld = alignHeld;
+
+        switch (alignState) {
+
+            case MANUAL:
+                // Only a fresh press starts an alignment.
+                if (rising) {
+                    schedule(follow(follower, pathToIdeal()));
+                    alignStarted = false;
+                    alignState = AlignState.ALIGNING;
+                }
+                break;
+
+            case ALIGNING:
+                if (!alignHeld || stickMag > STICK_ABORT_THRESHOLD) {
+                    // Driver let go or grabbed the sticks.
+                    Scheduler.reset();   // clears ALL scheduled Ivy commands
+                    alignState = AlignState.MANUAL;
+                } else if (follower.isBusy()) {
+                    alignStarted = true;     // path is genuinely running
+                } else if (alignStarted) {
+                    // Reached the target via R2: now (and only now) hold it.
+                    schedule(hold(follower, IDEAL_POSE));
+                    alignState = AlignState.ARRIVED;
+                }
+                // !started and !busy: command queued, not started yet. Wait.
+                break;
+
+            case ARRIVED:
+                // Pedro is holding the target. Any stick movement hands control
+                // back to the driver (stickMag is already past DRIVE_DEADZONE).
+                if (stickMag > 0) {
+                    Scheduler.reset();   // stops the hold
+                    alignState = AlignState.MANUAL;
+                } else if (rising) {
+                    // R2 pressed again: drive to the target again.
+                    Scheduler.reset();
+                    schedule(follow(follower, pathToIdeal()));
+                    alignStarted = false;
+                    alignState = AlignState.ALIGNING;
+                }
+                break;
+        }
+    }
+
+    /** True only in MANUAL. While ALIGNING Ivy drives; while ARRIVED Pedro holds the target. */
+    private boolean driverHasControl() {
+        return alignState == AlignState.MANUAL;
+    }
+
+    /**
+     * Straight line from the robot's current pose to IDEAL_POSE. .linear()
+     * turns the heading steadily while it drives, so the robot rotates to the
+     * target heading as it moves.
+     */
+    private Path pathToIdeal() {
+        Pose currentPose = follower.pose();
+        return line(currentPose, IDEAL_POSE).linear(currentPose, IDEAL_POSE);
+    }
+
+    /** Distance in inches from the robot to the target, for telemetry. */
+    private double distanceToTarget() {
+        return Math.hypot(IDEAL_POSE.x() - follower.pose().x(),
+                IDEAL_POSE.y() - follower.pose().y());
     }
 }

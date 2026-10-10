@@ -22,6 +22,9 @@
 
 package org.firstinspires.ftc.teamcode.Prism;
 
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
+
+@Disabled
 public enum Direction {
     Forward,
     Backward

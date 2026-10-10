@@ -57,6 +57,7 @@ import java.util.concurrent.TimeUnit;
 
 @TeleOp(name="Prism Animations Example", group="Linear OpMode")
 //@Disabled
+@Disabled
 public class  GoBildaPrismExample extends LinearOpMode {
 
     GoBildaPrismDriver prism;
