@@ -16,14 +16,26 @@ package org.firstinspires.ftc.teamcode;
 //    1x distance sensor — distance          (telemetry only — no longer drives the kicker)
 //    1x Prism light     — prism             (GoBilda Prism driver, status animations)
 //
+//  ALLIANCE / PRESET SELECTION
+//    During INIT (before PLAY), gamepad 1:
+//      dpad up           — choose RED side
+//      dpad down         — choose BLUE side
+//    The choice shows in telemetry. Default is RED.
+//    Each side has TWO presets (0 and 1). Each preset has its own
+//    shooting pose (R2 auto-drive target) and its own reset pose (X button).
+//    Preset 0 is the one you start on. Gamepad 1 L2 (press) toggles 0 <-> 1.
+//    Fill in the coordinates in the RED_* / BLUE_* arrays below.
+//
 //  CONTROLS
 //    Gamepad 1
 //      left stick        — drive / strafe
 //      right stick X     — rotate
-//      R2 (hold)         — auto-drive to IDEAL_POSE (turns while it moves).
-//                          Release R2 or move a stick to cancel.
-//      X                 — reset pose to ORIGIN (robot on the reset spot,
-//                          facing the same way). Ignored while aligning.
+//      L2 (press)        — switch preset (changes BOTH the shooting pose and
+//                          the reset pose for the chosen alliance).
+//      R2 (hold)         — auto-drive to the current shooting pose (turns
+//                          while it moves). Release R2 or move a stick to cancel.
+//      X                 — reset pose to the current reset pose (robot on the
+//                          reset spot, facing the same way). Ignored while aligning.
 //      After R2 arrives  — Pedro holds the target position until you move a
 //                          stick. Otherwise there is NO position hold.
 //
@@ -119,11 +131,36 @@ public class TeleMain extends OpMode {
 
     private static final PoseFactory p = PoseFactory.degrees();
 
-    // Reset / starting spot.
-    public static final Pose ORIGIN = p.of(8, 9, 90);
+    // ── Alliance + preset poses ──────────────────────────────────────────────
+    // Chosen in INIT with gamepad 1 dpad up (RED) / dpad down (BLUE).
+    private enum Alliance { RED, BLUE }
 
-    // Auto-drive target.
-    public static final Pose IDEAL_POSE = p.of(56, 14, -90);
+    // Each array has two presets: [0] = default, [1] = alternate (gamepad 1 L2).
+    // SHOOT = R2 auto-drive target.  RESET = where X resets the pose to.
+    //
+    // TODO: fill in the real coordinates. Preset 0 currently holds the old
+    // values as a stand-in, preset 1 is empty (0, 0, 0).
+    public static final Pose[] RED_SHOOT_POSES = {
+            p.of(56, 14, -90),   // TODO RED preset 0 shooting pose
+            p.of(56, 130, 90)        // TODO RED preset 1 shooting pose (empty)
+    };
+    public static final Pose[] RED_RESET_POSES = {
+            p.of(8, 9, -90),      // TODO RED preset 0 reset pose
+            p.of(8, 135, 90)        // TODO RED preset 1 reset pose (empty)
+    };
+
+    public static final Pose[] BLUE_SHOOT_POSES = {
+            p.of(83, 14, -90),   // TODO BLUE preset 0 shooting pose
+            p.of(83, 130, 90)        // TODO BLUE preset 1 shooting pose (empty)
+    };
+    public static final Pose[] BLUE_RESET_POSES = {
+            p.of(136, 9, -90),      // TODO BLUE preset 0 reset pose
+            p.of(136, 135, 90)        // TODO BLUE preset 1 reset pose (empty)
+    };
+
+    private Alliance alliance    = Alliance.RED;
+    private int      presetIndex = 0;       // 0 or 1, toggled by gamepad 1 L2
+    private boolean  lastL2      = false;
 
     // Stick movement past this cancels an in-progress alignment.
     private static final double STICK_ABORT_THRESHOLD = 0.15;
@@ -134,6 +171,9 @@ public class TeleMain extends OpMode {
     // True once the follower has actually become busy after scheduling; stops
     // the first tick from wrongly jumping to ARRIVED.
     private boolean    alignStarted  = false;
+    // The pose the current align is driving to / holding. Captured when R2 is
+    // pressed so pressing L2 mid-align can't make the path and hold disagree.
+    private Pose       alignTarget   = RED_SHOOT_POSES[0];
 
     // ── Shooter ──────────────────────────────────────────────────────────────
     private DcMotorEx leftShooter, rightShooter;
@@ -213,6 +253,20 @@ public class TeleMain extends OpMode {
     private boolean lastRightBumper = false;
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  Alliance / preset helpers
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /** Shooting pose (R2 auto-drive target) for the chosen alliance + preset. */
+    private Pose idealPose() {
+        return (alliance == Alliance.RED ? RED_SHOOT_POSES : BLUE_SHOOT_POSES)[presetIndex];
+    }
+
+    /** Reset pose (X button) for the chosen alliance + preset. */
+    private Pose originPose() {
+        return (alliance == Alliance.RED ? RED_RESET_POSES : BLUE_RESET_POSES)[presetIndex];
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  init
     // ═════════════════════════════════════════════════════════════════════════
     @Override
@@ -221,7 +275,11 @@ public class TeleMain extends OpMode {
         // Drive is handled by Pedro (motors fl/fr/bl/br are configured in Constants).
         Scheduler.reset();
         follower = Constants.create(hardwareMap);
-        follower.setPose(ORIGIN);
+        alliance    = Alliance.RED;
+        presetIndex = 0;
+        lastL2      = false;
+        follower.setPose(originPose());
+        alignTarget  = idealPose();
         alignState   = AlignState.MANUAL;
         alignWasHeld = false;
         resetWasHeld = false;
@@ -272,8 +330,38 @@ public class TeleMain extends OpMode {
 
         ballSensor = hardwareMap.get(DistanceSensor.class, "distance");
 
-        telemetry.addLine("Initialized — press PLAY");
+        telemetry.addLine("Initialized — choose side: gamepad1 dpad UP = RED, DOWN = BLUE");
+        telemetry.addData("Alliance", alliance);
         telemetry.update();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  init_loop — pick the alliance with gamepad 1 dpad before PLAY
+    // ═════════════════════════════════════════════════════════════════════════
+    @Override
+    public void init_loop() {
+        if (gamepad1.dpad_up)   alliance = Alliance.RED;
+        if (gamepad1.dpad_down) alliance = Alliance.BLUE;
+
+        // Keep the starting pose in sync with the chosen side.
+        follower.setPose(originPose());
+
+        telemetry.addLine("Gamepad 1:  dpad UP = RED   |   dpad DOWN = BLUE");
+        telemetry.addData("Alliance", alliance);
+        Pose o = originPose();
+        Pose s = idealPose();
+        telemetry.addData("Start pose", "x=%.1f  y=%.1f  heading=%.0f deg",
+                o.x(), o.y(), Math.toDegrees(o.heading()));
+        telemetry.addData("Shoot pose", "x=%.1f  y=%.1f  heading=%.0f deg",
+                s.x(), s.y(), Math.toDegrees(s.heading()));
+        telemetry.update();
+    }
+
+    @Override
+    public void start() {
+        // Lock in the chosen side's starting pose.
+        follower.setPose(originPose());
+        alignTarget = idealPose();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -283,6 +371,12 @@ public class TeleMain extends OpMode {
     public void loop() {
         prism.loadAnimationsFromArtboard(GoBildaPrismDriver.Artboard.ARTBOARD_0);
         currentArtboardState = 0;
+
+        // ── Preset toggle (gamepad 1 L2) ─────────────────────────────────────
+        // Switches BOTH the shooting pose and the reset pose for this alliance.
+        boolean l2 = gamepad1.left_trigger > TRIGGER_THRESHOLD;
+        if (l2 && !lastL2) presetIndex = 1 - presetIndex;
+        lastL2 = l2;
 
         // ── Drive ────────────────────────────────────────────────────────────
         double stickY  = -gamepad1.left_stick_y;
@@ -444,6 +538,7 @@ public class TeleMain extends OpMode {
         telemetry.addData("Linkage", linkageUp ? "UP" : "DOWN");
         telemetry.addData("Hood",    "%.2f  (LOWEST=%.2f START=%.2f)", hood.getPosition(), HOOD_LOWEST, HOOD_START);
         telemetry.addLine("---");
+        telemetry.addData("Alliance / preset", "%s  #%d", alliance, presetIndex);
         Pose pose = follower.pose();
         telemetry.addData("Align", "%s  busy=%b  mode=%s", alignState, follower.isBusy(), follower.mode());
         telemetry.addData("Pose", "x=%.1f  y=%.1f  heading=%.0f deg", pose.x(), pose.y(), Math.toDegrees(pose.heading()));
@@ -475,12 +570,13 @@ public class TeleMain extends OpMode {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  Auto-align to IDEAL_POSE (gamepad 1)
+    //  Auto-align to the shooting pose (gamepad 1)
     // ═════════════════════════════════════════════════════════════════════════
 
     /**
-     * Gamepad 1 X = reset pose to ORIGIN. Gamepad 1 R2 (hold) = auto-drive to
-     * IDEAL_POSE. Only one thing owns the drivetrain at a time:
+     * Gamepad 1 X = reset pose to the current reset pose. Gamepad 1 R2 (hold)
+     * = auto-drive to the current shooting pose. Only one thing owns the
+     * drivetrain at a time:
      *   MANUAL   — driver (plain stick drive, no position hold)
      *   ALIGNING — Ivy is driving the path
      *   ARRIVED  — path done; Pedro holds the target until a stick moves.
@@ -490,7 +586,7 @@ public class TeleMain extends OpMode {
         // X: reset pose once per press, only while the driver has control.
         boolean xHeld = gamepad1.x;
         if (xHeld && !resetWasHeld && driverHasControl()) {
-            follower.setPose(ORIGIN);
+            follower.setPose(originPose());
         }
         resetWasHeld = xHeld;
 
@@ -503,7 +599,8 @@ public class TeleMain extends OpMode {
             case MANUAL:
                 // Only a fresh press starts an alignment.
                 if (rising) {
-                    schedule(follow(follower, pathToIdeal()));
+                    alignTarget = idealPose();
+                    schedule(follow(follower, pathTo(alignTarget)));
                     alignStarted = false;
                     alignState = AlignState.ALIGNING;
                 }
@@ -518,7 +615,7 @@ public class TeleMain extends OpMode {
                     alignStarted = true;     // path is genuinely running
                 } else if (alignStarted) {
                     // Reached the target via R2: now (and only now) hold it.
-                    schedule(hold(follower, IDEAL_POSE));
+                    schedule(hold(follower, alignTarget));
                     alignState = AlignState.ARRIVED;
                 }
                 // !started and !busy: command queued, not started yet. Wait.
@@ -531,9 +628,10 @@ public class TeleMain extends OpMode {
                     Scheduler.reset();   // stops the hold
                     alignState = AlignState.MANUAL;
                 } else if (rising) {
-                    // R2 pressed again: drive to the target again.
+                    // R2 pressed again: drive to the (possibly new) target.
                     Scheduler.reset();
-                    schedule(follow(follower, pathToIdeal()));
+                    alignTarget = idealPose();
+                    schedule(follow(follower, pathTo(alignTarget)));
                     alignStarted = false;
                     alignState = AlignState.ALIGNING;
                 }
@@ -547,18 +645,19 @@ public class TeleMain extends OpMode {
     }
 
     /**
-     * Straight line from the robot's current pose to IDEAL_POSE. .linear()
+     * Straight line from the robot's current pose to the given target. .linear()
      * turns the heading steadily while it drives, so the robot rotates to the
      * target heading as it moves.
      */
-    private Path pathToIdeal() {
+    private Path pathTo(Pose target) {
         Pose currentPose = follower.pose();
-        return line(currentPose, IDEAL_POSE).linear(currentPose, IDEAL_POSE);
+        return line(currentPose, target).linear(currentPose, target);
     }
 
-    /** Distance in inches from the robot to the target, for telemetry. */
+    /** Distance in inches from the robot to the current shooting pose, for telemetry. */
     private double distanceToTarget() {
-        return Math.hypot(IDEAL_POSE.x() - follower.pose().x(),
-                IDEAL_POSE.y() - follower.pose().y());
+        Pose target = idealPose();
+        return Math.hypot(target.x() - follower.pose().x(),
+                target.y() - follower.pose().y());
     }
 }
