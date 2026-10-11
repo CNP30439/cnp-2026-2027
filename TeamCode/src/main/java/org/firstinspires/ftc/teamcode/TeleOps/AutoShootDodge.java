@@ -136,7 +136,7 @@ import static com.pedropathing.ivy.Scheduler.schedule;
 import static com.pedropathing.ivy.pedro.PedroCommands.follow;
 import static com.pedropathing.ivy.pedro.PedroCommands.hold;
 
-@TeleOp(name = "TeleMain😎", group = "TeleOp")
+@TeleOp(name = "Autoshotdodge😁", group = "TeleOp")
 public class AutoShootDodge extends OpMode {
 
     // ── Drive ────────────────────────────────────────────────────────────────
@@ -164,8 +164,8 @@ public class AutoShootDodge extends OpMode {
             p.of(56, 130, 90)    // RED preset 1 shooting pose
     };
     public static final Pose[] RED_RESET_POSES = {
-            p.of(8, 9, -90),     // RED preset 0 reset pose
-            p.of(8, 135, 90)     // RED preset 1 reset pose
+            p.of(7.25, 8, -90),     // RED preset 0 reset pose
+            p.of(7.25, 136, 90)     // RED preset 1 reset pose
     };
 
     public static final Pose[] BLUE_SHOOT_POSES = {
@@ -173,8 +173,8 @@ public class AutoShootDodge extends OpMode {
             p.of(83, 130, 90)    // BLUE preset 1 shooting pose
     };
     public static final Pose[] BLUE_RESET_POSES = {
-            p.of(136, 9, -90),   // BLUE preset 0 reset pose
-            p.of(136, 135, 90)   // BLUE preset 1 reset pose
+            p.of(135.25, 8, -90),   // BLUE preset 0 reset pose
+            p.of(135.25, 136, 90)   // BLUE preset 1 reset pose
     };
 
     private Alliance alliance    = Alliance.RED;
@@ -207,7 +207,7 @@ public class AutoShootDodge extends OpMode {
 
     // The robot pose is its CENTER, so it must stay at least this far from the
     // edge of any structure.
-    private static final double ROBOT_MARGIN = 7.0;
+    private static final double ROBOT_MARGIN = 9.0;
 
     // When the straight line is blocked the robot follows one continuous, smooth
     // path (Paths.path of lines + curves): straight runs joined by rounded corners, so it
@@ -264,7 +264,7 @@ public class AutoShootDodge extends OpMode {
     // ── Linkage ──────────────────────────────────────────────────────────────
     private Servo linkageLeft, linkageRight;
     private static final double LINKAGE_DOWN = 0;
-    private static final double LINKAGE_UP   = .5;
+    private static final double LINKAGE_UP   = .37;
     private boolean linkageUp = false;
     private int currentArtboardState = -1;
 
@@ -969,6 +969,27 @@ public class AutoShootDodge extends OpMode {
         }
         return true;
     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     /** Distance in inches from the robot to the current shooting pose, for telemetry. */
     private double distanceToTarget() {
