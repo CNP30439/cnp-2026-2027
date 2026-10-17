@@ -8,7 +8,7 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 //  HARDWARE (names must match the Robot Configuration on the Driver Hub)
 //    4x drive motors    — fl, fr, bl, br    (mecanum)
 //    2x shooter motors  — ls, rs            (rs REVERSED so both spin the same way)
-//    2x intake motors   — li, ri            (ri REVERSED so both pull inward)
+//    2x intake motors   — li, ri            (li REVERSED so both pull inward)
 //    2x linkage servos  — linkageleft, linkageright  (always same position)
 //    1x blocker servo   — blocker           (toggles OPEN / CLOSED)
 //    1x hood servo      — hood              (driven by R2 — see HOOD section below)
@@ -58,12 +58,14 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 //      Y                 — toggle blocker open / closed
 //      R2 (right trigger)— SHOOT (hold): intake runs IN and blocker OPENS
 //                          immediately. After KICK_DELAY_MS has elapsed from
-//                          when R2 was first pressed, the kicker fires and
-//                          stays at KICK for the rest of the hold. Release R2
-//                          and the kicker snaps straight back to BASE; the
-//                          delay resets fresh on every new R2 press.
+//                          when R2 was first pressed, the kicker goes UP ONCE,
+//                          and as soon as it has had time to reach the KICK
+//                          position (KICK_TRAVEL_MS) it goes straight back DOWN
+//                          to BASE. It does NOT stay up while R2 is held.
+//                          To kick again: release R2 and press it again (the
+//                          delay and the kick reset fresh on every new press).
 //                          Holding R2 also ramps the shooter up by +BOOST_MAX
-//                          ticks/sec over BOOST_RAMP_SECS (0.2s); releasing
+//                          ticks/sec over BOOST_RAMP_SECS; releasing
 //                          R2 ramps that boost back down over the same time.
 //                          R2 ALSO drives the hood directly (no separate
 //                          button) — see HOOD below.
@@ -76,10 +78,10 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 //
 //  SHOOT SEQUENCE (while R2 held)
 //    1. Blocker forced OPEN, intake forced IN — happens the instant R2 is pressed.
-//    2. Kicker waits at BASE for KICK_DELAY_MS from the moment R2 was pressed,
-//       then moves to KICK and stays there for the rest of the hold.
-//    3. On release of R2, kicker snaps back to BASE and the delay resets fresh
-//       for the next R2 press.
+//    2. Kicker waits at BASE for KICK_DELAY_MS from the moment R2 was pressed.
+//    3. Kicker moves to KICK. Once KICK_TRAVEL_MS has passed (time for the
+//       servo to reach the position) it returns to BASE and stays there.
+//    4. Release R2 and press again to run the sequence again.
 //    NOTE: R2 does not turn the shooter on by itself — spin it up with dpad up
 //    first so the flywheels are at speed when balls arrive.
 //
@@ -87,9 +89,9 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 //    Closed-loop velocity (ticks/sec) using PIDF gains from FlywheelTuner.
 //    Left/right bumper nudge the current HIGH or LOW target by VELOCITY_STEP.
 //    While R2 is held, shooter also gets a boost ramping up to +BOOST_MAX
-//    ticks/sec over BOOST_RAMP_SECS (0.2s), ramping back down on release.
+//    ticks/sec over BOOST_RAMP_SECS, ramping back down on release.
 //    STRUCTURE DODGING: the R2 auto-drive avoids the two rectangles in
-//    KEEP_OUT_ZONES, staying ROBOT_MARGIN (7 in, pose is the robot center) away
+//    KEEP_OUT_ZONES, staying ROBOT_MARGIN (pose is the robot center) away
 //    from their edges. If the straight line is clear it drives straight; if not
 //    it follows one continuous rounded path around the structures (or between them), checked
 //    against the margin before it is used. Rectangles left as {0,0,0,0} are
@@ -154,11 +156,8 @@ public class AutoShootDodge extends OpMode {
     // Chosen in INIT with gamepad 1 dpad up (RED) / dpad down (BLUE).
     private enum Alliance { RED, BLUE }
 
-    // Each array has two presets: [0] = default, [1] = alternate (gamepad 1 L2).
+    // Each array has two presets: [0] = default, [1] = alternate (gamepad 1 B).
     // SHOOT = R2 auto-drive target.  RESET = where X resets the pose to.
-    //
-    // TODO: fill in the real coordinates. Preset 0 currently holds the old
-    // values as a stand-in, preset 1 is empty (0, 0, 0).
     public static final Pose[] RED_SHOOT_POSES = {
             p.of(56, 14, -90),   // RED preset 0 shooting pose
             p.of(56, 130, 90)    // RED preset 1 shooting pose
@@ -188,7 +187,7 @@ public class AutoShootDodge extends OpMode {
     // the first tick from wrongly jumping to ARRIVED.
     private boolean    alignStarted  = false;
     // The pose the current align is driving to / holding. Captured when R2 is
-    // pressed so pressing L2 mid-align can't make the path and hold disagree.
+    // pressed so pressing B mid-align can't make the path and hold disagree.
     private Pose       alignTarget   = RED_SHOOT_POSES[0];
 
     // ── Structure dodging ────────────────────────────────────────────────────
@@ -198,8 +197,6 @@ public class AutoShootDodge extends OpMode {
     // If the line would clip one, it plans a detour around the (padded) corners
     // instead. A rectangle left as {0, 0, 0, 0} is ignored, so the drive is
     // unchanged until you fill them in.
-    //
-    // TODO: fill in the real coordinates for both structures.
     public static final double[][] KEEP_OUT_ZONES = {
             {45, 50, 49, 91},   // STRUCTURE 1  {minX, minY, maxX, maxY}
             {91, 50, 96, 91}    // STRUCTURE 2  {minX, minY, maxX, maxY}
@@ -233,20 +230,20 @@ public class AutoShootDodge extends OpMode {
     private static final double SHOOTER_F_RIGHT = 18.3237;
     private GoBildaPrismDriver prism;
 
-    private double shooterHighVelocity = 1250;
-    private double shooterLowVelocity  = 1250;
+    private double shooterHighVelocity = 1200;
+    private double shooterLowVelocity  = 1200;
     private static final double VELOCITY_STEP = 50;
     private static final double VELOCITY_MIN  = 0;
 
     private boolean shooterOn   = false;
     private boolean shooterHigh = false;
 
-    // Boost ramps from 0 -> BOOST_MAX over BOOST_RAMP_SECS (0.2s), and back
+    // Boost ramps from 0 -> BOOST_MAX over BOOST_RAMP_SECS, and back
     // down over the same time once R2 is released.
     private double shooterBoost = 0;
     private static final double BOOST_MAX       = 0;
     private static final double BOOST_RAMP_SECS = 0;
-    private static final double BOOST_RATE      = BOOST_MAX / BOOST_RAMP_SECS; // 2750 ticks/sec²
+    private static final double BOOST_RATE      = BOOST_MAX / BOOST_RAMP_SECS;
     private final ElapsedTime boostTimer = new ElapsedTime();
 
     // Game-long ramp: the shooter target creeps up linearly from the HIGH/LOW
@@ -280,10 +277,16 @@ public class AutoShootDodge extends OpMode {
     private static final double HOOD_LOWEST = 0.35; // TODO — tune on the bench
 
     // ── Kicker ───────────────────────────────────────────────────────────────
+    // Sequence per R2 press:  wait KICK_DELAY_MS at BASE -> go to KICK ->
+    // after KICK_TRAVEL_MS (time for the servo to reach KICK) go back to BASE.
+    // A standard servo has no position feedback, so "position reached" is
+    // timed. Tune KICK_TRAVEL_MS: raise it if the kicker doesn't fully reach
+    // KICK before dropping, lower it if it lingers up there.
     private Servo kicker;
-    private static final double KICKER_BASE    = 0.8;
-    private static final double KICKER_KICK    = 0.5;
-    private static final long   KICK_DELAY_MS  = 500; // ms after R2 press before kicker fires
+    private static final double KICKER_BASE      = 0.8;
+    private static final double KICKER_KICK      = 0.5;
+    private static final long   KICK_DELAY_MS    = 500; // ms after R2 press before kicker goes up
+    private static final long   KICK_TRAVEL_MS   = 300; // ms for kicker to reach KICK, then it drops
 
     private final ElapsedTime kickTimer  = new ElapsedTime();
     private boolean lastShooting = false;
@@ -363,8 +366,9 @@ public class AutoShootDodge extends OpMode {
 
         leftIntake  = hardwareMap.get(DcMotorEx.class, "li");
         rightIntake = hardwareMap.get(DcMotorEx.class, "ri");
-        leftIntake.setDirection(DcMotorSimple.Direction.FORWARD);
-        rightIntake.setDirection(DcMotorSimple.Direction.REVERSE);
+        // Flipped: positive power now pulls balls IN (shoot-feed, A) and negative pushes OUT (B).
+        leftIntake.setDirection(DcMotorSimple.Direction.REVERSE);
+        rightIntake.setDirection(DcMotorSimple.Direction.FORWARD);
         leftIntake.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         rightIntake.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         leftIntake.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
@@ -372,7 +376,7 @@ public class AutoShootDodge extends OpMode {
 
         linkageLeft  = hardwareMap.get(Servo.class, "linkageleft");
         linkageRight = hardwareMap.get(Servo.class, "linkageright");
-        linkageRight.setDirection(Servo.Direction.REVERSE);   // <-- add this
+        linkageRight.setDirection(Servo.Direction.REVERSE);
         linkageUp = false;
         setLinkagePosition(LINKAGE_DOWN);
 
@@ -431,7 +435,7 @@ public class AutoShootDodge extends OpMode {
         prism.loadAnimationsFromArtboard(GoBildaPrismDriver.Artboard.ARTBOARD_0);
         currentArtboardState = 0;
 
-        // ── Preset toggle (gamepad 1 L2) ─────────────────────────────────────
+        // ── Preset toggle (gamepad 1 B) ──────────────────────────────────────
         // Switches BOTH the shooting pose and the reset pose for this alliance.
         boolean presetBtn = gamepad1.b;
         if (presetBtn && !lastPresetBtn) presetIndex = 1 - presetIndex;
@@ -517,7 +521,7 @@ public class AutoShootDodge extends OpMode {
             shooterMode     = "LOW";
         }
 
-        // Boost: 0 -> BOOST_MAX in 0.2s while R2 held, back to 0 in 0.2s on release.
+        // Boost: 0 -> BOOST_MAX while R2 held, back to 0 on release.
         double boostDt = boostTimer.seconds();
         boostTimer.reset();
         double boostTarget = shooting ? BOOST_MAX : 0;
@@ -550,8 +554,13 @@ public class AutoShootDodge extends OpMode {
         }
         lastShooting = shooting;
 
-        // Kicker fires once KICK_DELAY_MS has elapsed from the R2 press.
-        boolean kickReady = shooting && kickTimer.milliseconds() >= KICK_DELAY_MS;
+        // Kicker window: goes UP once KICK_DELAY_MS has elapsed from the R2 press,
+        // then comes back DOWN after KICK_TRAVEL_MS. It never goes up again until
+        // R2 is released and pressed again (that resets kickTimer).
+        double kickMs = kickTimer.milliseconds();
+        boolean kickReady = shooting
+                && kickMs >= KICK_DELAY_MS
+                && kickMs <  KICK_DELAY_MS + KICK_TRAVEL_MS;
 
         double intakePower;
         String intakeMode;
@@ -596,13 +605,14 @@ public class AutoShootDodge extends OpMode {
         telemetry.addData("Game ramp", "+%.1f ticks/sec  (%.0f s elapsed)", gameRamp, gameTimer.seconds());
         telemetry.addData("Shooting (R2)", shooting ? "YES" : "no");
         if (shooting) {
+            String kickStatus = kickReady ? "(UP)"
+                    : (kickMs < KICK_DELAY_MS ? "(waiting)" : "(done — release R2 to re-arm)");
             telemetry.addData("Kick delay", "%.0f / %d ms  %s",
-                    Math.min(kickTimer.milliseconds(), KICK_DELAY_MS), KICK_DELAY_MS,
-                    kickReady ? "(FIRING)" : "(waiting)");
+                    Math.min(kickMs, KICK_DELAY_MS), KICK_DELAY_MS, kickStatus);
         }
         telemetry.addData("Intake",  "%s", intakeMode);
         telemetry.addData("Blocker", blockerIsOpen ? "OPEN" : "CLOSED");
-        telemetry.addData("Kicker",  kickReady ? "KICK" : "BASE");
+        telemetry.addData("Kicker",  (shooting && kickReady) ? "KICK" : "BASE");
         telemetry.addData("Ball dist (in)", "%.1f  %s", ballDist, ballPresent ? "BALL" : "empty");
         telemetry.addData("Linkage", linkageUp ? "UP" : "DOWN");
         telemetry.addData("Hood",    "%.2f  (LOWEST=%.2f START=%.2f)", hood.getPosition(), HOOD_LOWEST, HOOD_START);
@@ -614,7 +624,6 @@ public class AutoShootDodge extends OpMode {
         telemetry.addData("Distance to target", "%.1f in", distanceToTarget());
         telemetry.addData("Route", alignState == AlignState.MANUAL ? "-" :
                 (routeCorners > 0 ? "curving around structures (" + routeCorners + " guide pts)" : "straight"));
-
 
         telemetry.update();
     }
@@ -969,27 +978,6 @@ public class AutoShootDodge extends OpMode {
         }
         return true;
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     /** Distance in inches from the robot to the current shooting pose, for telemetry. */
     private double distanceToTarget() {

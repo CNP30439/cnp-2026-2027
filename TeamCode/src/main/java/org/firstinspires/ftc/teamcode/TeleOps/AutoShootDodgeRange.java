@@ -10,6 +10,7 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 //    2x shooter motors  — ls, rs            (rs REVERSED so both spin the same way)
 //    2x intake motors   — li, ri            (ri REVERSED so both pull inward)
 //    2x linkage servos  — linkageleft, linkageright  (always same position)
+//    1x blocker servo   — blocker           (OPEN while shooting, CLOSED otherwise)
 //    1x kicker servo    — kicker            (BASE / KICK — pushes last ball up)
 //    1x Prism light     — prism             (GoBilda Prism driver, status animations)
 //
@@ -82,7 +83,7 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 //    against the margin before it is used. Rectangles left as {0,0,0,0} are
 //    ignored until you fill in the coordinates.
 //    GAME RAMP: from PLAY, the commanded velocity also creeps up linearly by
-//    GAME_RAMP_EXTRA (25) over GAME_RAMP_SECS (120 s), so 1250 -> 1275 across
+//    GAME_RAMP_EXTRA (25) over GAME_RAMP_SECS (120 s), so 1100 -> 1125 across
 //    the full 2 minutes, then holds at +25.
 //
 //  VOLTAGE / CURRENT MONITORING
@@ -164,8 +165,9 @@ public class AutoShootDodgeRange extends OpMode {
 
     // ── Goals + free-shooting zones ──────────────────────────────────────────
     // Preset 0 = bottom goal, preset 1 = top goal. {x, y} in field inches.
-    public static final double[][] RED_GOALS  = { {57, 53}, {57, 82} };
-    public static final double[][] BLUE_GOALS = { {84, 53}, {84, 82} };
+    // These are the spots the shooter must point at (checked in the line-up tester).
+    public static final double[][] RED_GOALS  = { {58, 52}, {58, 90} };
+    public static final double[][] BLUE_GOALS = { {84, 51}, {84, 90} };
 
     // The robot may shoot from anywhere inside these bounds (R2 drives to the
     // NEAREST point inside them, so it's the fastest path).
@@ -173,7 +175,7 @@ public class AutoShootDodgeRange extends OpMode {
     private static final double PRESET1_MIN_Y = 116;   // preset 1: y must be over this
     private static final double RED_X_MIN  = 25,  RED_X_MAX  = 85;
     private static final double BLUE_X_MIN = 50,  BLUE_X_MAX = 119;
-    private static final double ZONE_MARGIN = 1.0;     // aim this far INSIDE the bounds
+    private static final double ZONE_MARGIN = 8.0;     // aim this far INSIDE the bounds
     private static final double WALL_MARGIN = 8.0;     // robot center stays this far from field edge
 
     // Distance from the goal the robot tries to stop at (the distance the shot is tuned
@@ -194,6 +196,19 @@ public class AutoShootDodgeRange extends OpMode {
     private static final double HEADING_TOL_RAD = Math.toRadians(3);
     private static final double POSITION_TOL_IN = 1.5;
     private boolean turnOnly = false;
+
+    // ── Aim check before auto-shoot ──────────────────────────────────────────
+    // Auto-shoot only fires while the shooter really points at the goal, measured
+    // from where the robot IS (not where it was told to stop).
+    private static final double AIM_OK_RAD     = Math.toRadians(1.0);  // start shooting when aim error is under this
+    private static final double AIM_LOST_RAD   = Math.toRadians(1.5);  // pause shooting if it gets worse than this (e.g. bumped)
+    private static final double AIM_LATE_RAD   = Math.toRadians(1.5);  // after AIM_LATE_MS, accept this instead (was 2.0 - too loose)
+    private static final double AIM_LATE_MS    = 1500;                 // was 1000 - give the re-aim loop more time before settling for AIM_LATE_RAD
+    private static final double REAIM_RAD      = Math.toRadians(0.3);  // re-aim the hold heading when it is off by this
+    private static final double REAIM_EVERY_MS = 50;                   // was 100 - chase drift twice as fast
+    private boolean aimLocked = false;
+    private final ElapsedTime arrivedTimer = new ElapsedTime();
+    private final ElapsedTime reaimTimer   = new ElapsedTime();
 
     private Alliance alliance    = Alliance.RED;
     private int      presetIndex = 0;       // 0 or 1, toggled by gamepad 1 B
@@ -251,8 +266,8 @@ public class AutoShootDodgeRange extends OpMode {
     private static final double SHOOTER_F_RIGHT = 18.3237;
     private GoBildaPrismDriver prism;
 
-    private double shooterHighVelocity = 1250;
-    private double shooterLowVelocity  = 1250;
+    private double shooterHighVelocity = 1000;
+    private double shooterLowVelocity  = 1000;
     private static final double VELOCITY_STEP = 50;
     private static final double VELOCITY_MIN  = 0;
 
@@ -268,10 +283,10 @@ public class AutoShootDodgeRange extends OpMode {
     private final ElapsedTime boostTimer = new ElapsedTime();
 
     // Game-long ramp: the shooter target creeps up linearly from the HIGH/LOW
-    // target (1250) to 1275 over the full 2-minute TeleOp, starting at PLAY.
+    // target (1100) to 1125 over the full 2-minute TeleOp, starting at PLAY.
     // It is added on top of the target, so bumper trims still work.
     private static final double GAME_RAMP_SECS    = 120;   // full 2 min
-    private static final double GAME_RAMP_EXTRA   = 25;    // 1250 -> 1275
+    private static final double GAME_RAMP_EXTRA   = 25;    // 1100 -> 1125
     private final ElapsedTime gameTimer = new ElapsedTime();
     private double gameRamp = 0;
 
@@ -286,6 +301,12 @@ public class AutoShootDodgeRange extends OpMode {
     private boolean linkageUp = false;
     private int currentArtboardState = -1;
 
+
+    // ── Blocker ──────────────────────────────────────────────────────────────
+    // Opens while shooting (R2), snaps back closed the moment shooting stops.
+    private Servo blocker;
+    private static final double BLOCKER_CLOSED = 1.0;
+    private static final double BLOCKER_OPEN   = 0.6;
 
     // ── Kicker ───────────────────────────────────────────────────────────────
     private Servo kicker;
@@ -372,6 +393,19 @@ public class AutoShootDodgeRange extends OpMode {
         return Math.hypot(g[0] - follower.pose().x(), g[1] - follower.pose().y());
     }
 
+    /** Aim error (radians) from the robot's CURRENT position: + = shot too far left. */
+    private double aimErrorRad() {
+        Pose now = follower.pose();
+        return angleDiff(now.heading(), headingToGoal(now.x(), now.y()));
+    }
+
+    private void enterArrived() {
+        alignState = AlignState.ARRIVED;
+        aimLocked = false;
+        arrivedTimer.reset();
+        reaimTimer.reset();
+    }
+
     private static double angleDiff(double a, double b) {
         return Math.atan2(Math.sin(a - b), Math.cos(a - b));
     }
@@ -420,8 +454,9 @@ public class AutoShootDodgeRange extends OpMode {
 
         leftIntake  = hardwareMap.get(DcMotorEx.class, "li");
         rightIntake = hardwareMap.get(DcMotorEx.class, "ri");
-        leftIntake.setDirection(DcMotorSimple.Direction.FORWARD);
-        rightIntake.setDirection(DcMotorSimple.Direction.REVERSE);
+        // Flipped: positive power now pulls balls IN (shoot-feed, A) and negative pushes OUT (B).
+        leftIntake.setDirection(DcMotorSimple.Direction.REVERSE);
+        rightIntake.setDirection(DcMotorSimple.Direction.FORWARD);
         leftIntake.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         rightIntake.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         leftIntake.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
@@ -433,6 +468,9 @@ public class AutoShootDodgeRange extends OpMode {
         linkageUp = false;
         setLinkagePosition(LINKAGE_DOWN);
 
+
+        blocker = hardwareMap.get(Servo.class, "blocker");
+        blocker.setPosition(BLOCKER_CLOSED);
 
         kicker = hardwareMap.get(Servo.class, "kicker");
         kicker.setPosition(KICKER_BASE);
@@ -539,7 +577,7 @@ public class AutoShootDodgeRange extends OpMode {
         // intake feed) keys off this one flag, so auto-shoot behaves
         // exactly like a gamepad 2 R2 press.
         boolean shooting = gamepad2.right_trigger > TRIGGER_THRESHOLD
-                || alignState == AlignState.ARRIVED;
+                || (alignState == AlignState.ARRIVED && aimLocked);
 
         // ── Flywheel speed trim ───────────────────────────────────────────────
         boolean curLeftBumper  = gamepad2.left_bumper;
@@ -604,6 +642,7 @@ public class AutoShootDodgeRange extends OpMode {
         if (shooting) {
             intakePower = INTAKE_POWER;
             intakeMode  = "SHOOT-FEED";
+            blocker.setPosition(BLOCKER_OPEN);
             kicker.setPosition(kickReady ? KICKER_KICK : KICKER_BASE);
         } else {
             if (gamepad2.a) {
@@ -616,6 +655,7 @@ public class AutoShootDodgeRange extends OpMode {
                 intakePower = 0;
                 intakeMode  = "STOPPED";
             }
+            blocker.setPosition(BLOCKER_CLOSED);
             kicker.setPosition(KICKER_BASE);
         }
 
@@ -644,6 +684,7 @@ public class AutoShootDodgeRange extends OpMode {
                     kickReady ? "(FIRING)" : "(waiting)");
         }
         telemetry.addData("Intake",  "%s", intakeMode);
+        telemetry.addData("Blocker", shooting ? "OPEN" : "CLOSED");
         telemetry.addData("Kicker",  kickReady ? "KICK" : "BASE");
         telemetry.addData("Linkage", linkageUp ? "UP" : "DOWN");
         telemetry.addLine("---");
@@ -653,6 +694,8 @@ public class AutoShootDodgeRange extends OpMode {
         telemetry.addData("Pose", "x=%.1f  y=%.1f  heading=%.0f deg", pose.x(), pose.y(), Math.toDegrees(pose.heading()));
         telemetry.addData("Distance to goal", "center %.1f in  /  shooter %.1f in",
                 distanceToGoal(), distanceToGoal() - SHOOTER_OFFSET_IN);
+        telemetry.addData("Aim error", "%.2f deg  %s", Math.toDegrees(aimErrorRad()),
+                alignState == AlignState.ARRIVED ? (aimLocked ? "(LOCKED - shooting)" : "(waiting to line up)") : "");
         telemetry.addData("Shoot target", "x=%.1f y=%.1f heading=%.0f deg",
                 alignTarget.x(), alignTarget.y(), Math.toDegrees(alignTarget.heading()));
         telemetry.addData("Route", alignState == AlignState.MANUAL ? "-" :
@@ -673,6 +716,7 @@ public class AutoShootDodgeRange extends OpMode {
         leftIntake.setPower(0);
         rightIntake.setPower(0);
         setLinkagePosition(LINKAGE_DOWN);
+        blocker.setPosition(BLOCKER_CLOSED);
         kicker.setPosition(KICKER_BASE);
     }
 
@@ -734,13 +778,13 @@ public class AutoShootDodgeRange extends OpMode {
                     Pose now = follower.pose();
                     boolean headingOk = Math.abs(angleDiff(now.heading(), alignTarget.heading())) < HEADING_TOL_RAD;
                     boolean posOk = Math.hypot(alignTarget.x() - now.x(), alignTarget.y() - now.y()) < POSITION_TOL_IN;
-                    if (headingOk && posOk) alignState = AlignState.ARRIVED;  // hold already scheduled
+                    if (headingOk && posOk) enterArrived();  // hold already scheduled
                 } else if (follower.isBusy()) {
                     alignStarted = true;     // path is genuinely running
                 } else if (alignStarted) {
                     // Reached the target via R2: now (and only now) hold it.
                     schedule(hold(follower, alignTarget));
-                    alignState = AlignState.ARRIVED;
+                    enterArrived();
                 }
                 // !started and !busy: command queued, not started yet. Wait.
                 break;
@@ -751,7 +795,26 @@ public class AutoShootDodgeRange extends OpMode {
                 if (!alignHeld) {
                     Scheduler.reset();   // stops the hold
                     alignState = AlignState.MANUAL;
+                    aimLocked = false;
+                    break;
                 }
+                // Re-aim from where the robot actually is. If it stopped a little off the
+                // spot (or got pushed), the heading to the goal is different from the one
+                // worked out for the spot, so update the held heading.
+                Pose now = follower.pose();
+                double want = headingToGoal(now.x(), now.y());
+                if (Math.abs(angleDiff(want, alignTarget.heading())) > REAIM_RAD
+                        && reaimTimer.milliseconds() > REAIM_EVERY_MS) {
+                    alignTarget = p.of(alignTarget.x(), alignTarget.y(), Math.toDegrees(want));
+                    Scheduler.reset();
+                    schedule(hold(follower, alignTarget));
+                    reaimTimer.reset();
+                }
+                // Only shoot while really aimed. Pauses (and the kick delay restarts) if bumped off aim.
+                double aimErr = Math.abs(aimErrorRad());
+                double okTol = arrivedTimer.milliseconds() > AIM_LATE_MS ? AIM_LATE_RAD : AIM_OK_RAD;
+                if (!aimLocked && aimErr < okTol) aimLocked = true;
+                else if (aimLocked && aimErr > Math.max(AIM_LOST_RAD, okTol)) aimLocked = false;
                 break;
         }
     }
