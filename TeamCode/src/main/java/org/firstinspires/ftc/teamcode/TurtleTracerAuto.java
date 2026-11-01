@@ -9,7 +9,7 @@ import com.pedropathing.math.Pose;
 import com.pedropathing.paths.Path;
 import com.pedropathing.paths.interpolator.Interpolator;
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
-import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
@@ -20,38 +20,35 @@ import com.qualcomm.robotcore.util.ElapsedTime;
 import org.firstinspires.ftc.teamcode.pedro.Constants;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  TurtleTracerAuto — Autonomous OpMode (FTC BioBuzz Season)
-//
-//  SEQUENCE:
-//    1. Start Pose: (59.601, 10.167, 90°)
-//    2. Drive Shootingpoint1 -> First Shooting Spot (60.0, 25.0, -90°) & Auto-Aim / SHOOT.
-//    3. Drive IntakePoint1 -> Intaking location (11.686, 12.037, 0°) with INTAKE ON.
-//    4. Drive ShootingPoint2 -> Second Shooting Spot (39.968, 114.176, 0°).
-//    5. Auto-Aim at High Goal Target (62.685, 86.537) & SHOOT.
-//    6. Drive ParkingPoint -> Final Park Spot (10.050, 114.176, 0°).
-//    7. Stop all subsystems.
+//  TurtleTracerAuto — Iterative OpMode Autonomous (FTC BioBuzz Season)
+//  Auto-generated paths with reverse interpolators & shooting/intaking state machine
 // ═══════════════════════════════════════════════════════════════════════════════
-@Autonomous(name = "TurtleTracerAuto", group = "Autonomous")
-public class TurtleTracerAuto extends LinearOpMode {
+@Autonomous(name = "AutoPath", group = "Autonomous")
+public class TurtleTracerAuto extends OpMode {
 
-    private Follower follower;
+    public Follower follower;
+    private final PoseFactory p = PoseFactory.degrees();
+    private int pathState;
+    private ElapsedTime pathTimer;
+    private ElapsedTime shootTimer;
+    private Paths paths;
 
-    // ── High Goal Coordinates ────────────────────────────────────────────────
+    // ── High Goal Coordinates & Orientation Offset ───────────────────────────
     public static final double GOAL_X = 62.6852;
     public static final double GOAL_Y = 86.5374;
+    public static final double SHOOTER_HEADING_OFFSET_DEG = 180.0;
 
-    // ── Hardware Declarations (From TeleOps) ─────────────────────────────────
+    // ── Subsystem Hardware Declarations ──────────────────────────────────────
     private DcMotorEx leftShooter, rightShooter;
     private DcMotorEx leftIntake, rightIntake;
     private Servo blocker, kicker, hood;
 
-    // ── Shooter Settings (PIDF & Velocities) ─────────────────────────────────
+    // ── Subsystem Parameters & Constants ─────────────────────────────────────
     private static final double SHOOTER_P       = 1.5;
     private static final double SHOOTER_F_LEFT  = 18.3237;
     private static final double SHOOTER_F_RIGHT = 18.3237;
     private static final double SHOOT_VEL       = 1250;
 
-    // ── Servo & Intake Parameters ────────────────────────────────────────────
     private static final boolean INTAKE_FLIPPED = true;
     private static final double INTAKE_POWER    = 1.0;
 
@@ -64,146 +61,213 @@ public class TurtleTracerAuto extends LinearOpMode {
     private static final double HOOD_START  = 0.5;
     private static final double HOOD_LOWEST = 0.35;
 
-    private static final long SPINUP_SETTLE_MS = 500;  // 0.5s flywheel settle time
-    private static final long KICK_DELAY_MS    = 500;  // Intake feed delay before kicker fires
-    private static final long SHOOT_HOLD_MS    = 1500; // Kicker hold duration to clear rings
+    private static final long KICK_DELAY_MS = 500;
+    private static final long SHOOT_HOLD_MS = 1500;
 
-    private Paths paths;
+    @Override
+    public void init() {
+        follower = Constants.create(hardwareMap);
+        follower.setPose(p.of(59.601, 10.167, -90.000));
 
-    // ── Path Definitions ─────────────────────────────────────────────────────
+        initHardware();
+
+        pathTimer  = new ElapsedTime();
+        shootTimer = new ElapsedTime();
+        paths      = new Paths(follower);
+
+        telemetry.addLine("TurtleTracerAuto Initialized & Ready!");
+        telemetry.update();
+    }
+
+    @Override
+    public void loop() {
+        follower.update();
+        pathState = autonomousPathUpdate();
+
+        telemetry.addData("Path State", pathState);
+        telemetry.addData("X", follower.pose().x());
+        telemetry.addData("Y", follower.pose().y());
+        telemetry.addData("Heading", Math.toDegrees(follower.pose().heading()));
+        telemetry.update();
+    }
+
+    // ── Turtle Tracer Paths Definition ───────────────────────────────────────
     public static class Paths {
+
         private static final PoseFactory p = PoseFactory.degrees();
         public Path Shootingpoint1;
         public Path IntakePoint1;
         public Path ShootingPoint2;
         public Path ParkingPoint;
 
-        public Paths() {
-            // Shooting Point #1: Align to (60.0, 25.0, -90°)
-            Shootingpoint1 = line(
-                    p.of(59.601, 10.167, -90.0),
-                    p.of(60.0, 25.0, -90.0)
-            ).linear(p.of(59.601, 10.167, -90.0), p.of(60.0, 25.0, -90.0));
+        public Paths(Follower follower) {
+            this.Shootingpoint1 = line(
+                    p.of(59.601, 10.167, 0.0),
+                    p.of(59.601, 22.087, 0.0)
+            ).reverseTangent();
 
-            // Intake Point #1: Drive to intake position facing (72, 72)
             IntakePoint1 = line(
-                    p.of(60.0, 25.0, -90.0),
+                    p.of(59.601, 22.087, 0.0),
                     p.of(11.686, 12.037, 0.0)
             ).heading(
                     Interpolator.piecewise().until(
                             1,
-                            Interpolator.facingPoint(p.of(72.000, 72.000, 0.0))
+                            Interpolator.facingPoint(p.of(72.000, 72.000, 0.0)).reverse()
                     )
             );
 
-            // Shooting Point #2: Curve to second shooting position
             ShootingPoint2 = curve(
                     p.of(11.686, 12.037, 0.0),
                     p.of(37.440, 103.658, 0.0),
                     p.of(24.233, 110.002, 0.0),
                     p.of(39.968, 114.176, 0.0)
-            ).facingPoint(p.of(72.000, 72.000, 0.0));
+            ).heading(Interpolator.facingPoint(p.of(72.000, 72.000, 0.0)).reverse());
 
-            // Parking Point: Drive to final park spot
             ParkingPoint = line(
                     p.of(39.968, 114.176, 0.0),
                     p.of(10.050, 114.176, 0.0)
-            ).facingPoint(p.of(72.000, 72.000, 0.0));
+            ).heading(Interpolator.facingPoint(p.of(72.000, 72.000, 0.0)).reverse());
         }
     }
 
-    @Override
-    public void runOpMode() {
-        // Initialize follower and hardware
-        follower = Constants.create(hardwareMap);
-        initHardware();
+    // ── Non-Blocking Autonomous State Machine ────────────────────────────────
+    public int autonomousPathUpdate() {
+        switch (pathState) {
+            case 0:
+                // Start drive to Shootingpoint1 & spin up flywheels
+                spinUpShooter(SHOOT_VEL);
+                follower.follow(paths.Shootingpoint1);
+                setPathState(1);
+                break;
 
-        // Set starting pose: (59.601, 10.167, -90°)
-        follower.setPose(PoseFactory.degrees().of(59.601, 10.167, -90.0));
-        follower.update();
+            case 1:
+                // Arrived at Shootingpoint1 -> Start Auto-Aim at Goal
+                if (!follower.isBusy()) {
+                    aimAtGoal(GOAL_X, GOAL_Y);
+                    setPathState(10);
+                }
+                break;
 
-        paths = new Paths();
+            case 10:
+                // Wait for Auto-Aim rotation to complete
+                if (!follower.isBusy()) {
+                    startShootingSequence();
+                    setPathState(11);
+                }
+                break;
 
-        telemetry.addLine("TurtleTracerAuto Initialized & Ready!");
-        telemetry.update();
+            case 11:
+                // Execute Shooting Sequence timer
+                if (shootTimer.milliseconds() >= KICK_DELAY_MS && kicker != null) {
+                    kicker.setPosition(KICKER_KICK);
+                }
+                if (shootTimer.milliseconds() >= (KICK_DELAY_MS + SHOOT_HOLD_MS)) {
+                    resetShootingMechanism();
 
-        waitForStart();
+                    // Start drive to IntakePoint1 with intake ON
+                    intakeOn();
+                    follower.follow(paths.IntakePoint1);
+                    setPathState(2);
+                }
+                break;
 
-        if (opModeIsActive()) {
-            // STEP 1: Spin up shooter & drive to Shootingpoint1
-            spinUpShooter(SHOOT_VEL);
-            telemetry.addLine("Navigating to Shootingpoint1 (First Shooting Spot)...");
-            telemetry.update();
-            followPath(paths.Shootingpoint1);
+            case 2:
+                // Driving & intaking along IntakePoint1
+                intakeOn();
+                if (!follower.isBusy()) {
+                    intakeOff();
+                    spinUpShooter(SHOOT_VEL);
 
-            // STEP 2: Auto-aim & shoot at First Shooting Spot
-            telemetry.addLine("Arrived at Shootingpoint1! Auto-aiming and shooting...");
-            telemetry.update();
-            aimAndShootAtGoal(GOAL_X, GOAL_Y);
+                    // Drive to ShootingPoint2
+                    follower.follow(paths.ShootingPoint2);
+                    setPathState(3);
+                }
+                break;
 
-            // STEP 3: Turn on intake & drive along IntakePoint1 to collect rings
-            telemetry.addLine("Intaking rings along IntakePoint1...");
-            telemetry.update();
-            intakeOn();
-            followPath(paths.IntakePoint1);
+            case 3:
+                // Arrived at ShootingPoint2 -> Start Auto-Aim at Goal
+                if (!follower.isBusy()) {
+                    aimAtGoal(GOAL_X, GOAL_Y);
+                    setPathState(20);
+                }
+                break;
 
-            // STEP 4: Turn off intake, spin up shooter & drive along ShootingPoint2
-            intakeOff();
-            spinUpShooter(SHOOT_VEL);
-            telemetry.addLine("Navigating to ShootingPoint2...");
-            telemetry.update();
-            followPath(paths.ShootingPoint2);
+            case 20:
+                // Wait for Auto-Aim rotation to complete
+                if (!follower.isBusy()) {
+                    startShootingSequence();
+                    setPathState(21);
+                }
+                break;
 
-            // STEP 5: Auto-aim & shoot at Second Shooting Spot
-            telemetry.addLine("Arrived at ShootingPoint2! Auto-aiming and shooting at Goal Target...");
-            telemetry.update();
-            aimAndShootAtGoal(GOAL_X, GOAL_Y);
+            case 21:
+                // Execute Shooting Sequence #2 timer
+                if (shootTimer.milliseconds() >= KICK_DELAY_MS && kicker != null) {
+                    kicker.setPosition(KICKER_KICK);
+                }
+                if (shootTimer.milliseconds() >= (KICK_DELAY_MS + SHOOT_HOLD_MS)) {
+                    resetShootingMechanism();
 
-            // STEP 6: Drive to final ParkingPoint
-            telemetry.addLine("Navigating to ParkingPoint...");
-            telemetry.update();
-            followPath(paths.ParkingPoint);
+                    // Drive to final ParkingPoint
+                    follower.follow(paths.ParkingPoint);
+                    setPathState(4);
+                }
+                break;
 
-            // STEP 7: Stop all subsystems
-            stopAll();
-            telemetry.addLine("Autonomous Route Complete!");
-            telemetry.update();
+            case 4:
+                // Arrived at ParkingPoint -> Stop Autonomous
+                if (!follower.isBusy()) {
+                    stopAll();
+                    setPathState(5);
+                }
+                break;
+
+            case 5:
+                stopAll();
+                requestOpModeStop();
+                pathState = -1;
+                break;
         }
-
-        stopAll();
+        return pathState;
     }
 
-    // ── Navigation & Execution Helpers ──────────────────────────────────────
-
-    public void followPath(Path path) {
-        follower.follow(path);
-
-        ElapsedTime startTimer = new ElapsedTime();
-        while (opModeIsActive() && !follower.isBusy() && startTimer.milliseconds() < 100) {
-            follower.update();
-        }
-
-        while (opModeIsActive() && follower.isBusy()) {
-            follower.update();
-
-            telemetry.addData("Robot X", "%.2f", follower.pose().x());
-            telemetry.addData("Robot Y", "%.2f", follower.pose().y());
-            telemetry.addData("Heading (deg)", "%.1f", Math.toDegrees(follower.pose().heading()));
-            if (follower.currentPath() != null) {
-                telemetry.addData("Remaining Distance", "%.2f in", follower.distanceToEndpoint());
-            }
-            telemetry.update();
-        }
+    public void setPathState(int pState) {
+        pathState = pState;
+        pathTimer.reset();
     }
 
-    public void waitMs(long ms) {
-        ElapsedTime timer = new ElapsedTime();
-        while (opModeIsActive() && timer.milliseconds() < ms) {
-            follower.update();
-        }
+    // ── Action & Subsystem Helpers ───────────────────────────────────────────
+
+    public void aimAtGoal(double goalX, double goalY) {
+        intakeOff();
+        Pose currentPose = follower.pose();
+        double dx = goalX - currentPose.x();
+        double dy = goalY - currentPose.y();
+
+        double targetHeadingDeg = Math.toDegrees(Math.atan2(dy, dx)) + SHOOTER_HEADING_OFFSET_DEG;
+        while (targetHeadingDeg > 180)  targetHeadingDeg -= 360;
+        while (targetHeadingDeg < -180) targetHeadingDeg += 360;
+
+        Pose aimedPose = p.of(currentPose.x(), currentPose.y(), targetHeadingDeg);
+        follower.follow(line(currentPose, aimedPose).linear(currentPose, aimedPose));
     }
 
-    // ── Subsystem Control Methods (From TeleOps) ─────────────────────────────
+    public void startShootingSequence() {
+        spinUpShooter(SHOOT_VEL);
+        if (hood != null) hood.setPosition(HOOD_LOWEST);
+        if (blocker != null) blocker.setPosition(BLOCKER_OPEN);
+        intakeOn();
+        if (kicker != null) kicker.setPosition(KICKER_BASE);
+        shootTimer.reset();
+    }
+
+    public void resetShootingMechanism() {
+        if (kicker != null) kicker.setPosition(KICKER_BASE);
+        if (blocker != null) blocker.setPosition(BLOCKER_CLOSED);
+        if (hood != null) hood.setPosition(HOOD_START);
+        intakeOff();
+        stopShooter();
+    }
 
     public void spinUpShooter(double targetVelocity) {
         if (leftShooter != null && rightShooter != null) {
@@ -232,47 +296,6 @@ public class TurtleTracerAuto extends LinearOpMode {
             rightIntake.setPower(0);
         }
     }
-
-    public void shootRings() {
-        shootRings(SPINUP_SETTLE_MS, KICK_DELAY_MS, SHOOT_HOLD_MS);
-    }
-
-    public void shootRings(long settleMs, long kickDelayMs, long holdMs) {
-        spinUpShooter(SHOOT_VEL);
-        waitMs(settleMs);
-
-        if (hood != null) hood.setPosition(HOOD_LOWEST);
-        if (blocker != null) blocker.setPosition(BLOCKER_OPEN);
-        intakeOn();
-        if (kicker != null) kicker.setPosition(KICKER_BASE);
-
-        waitMs(kickDelayMs);
-        if (kicker != null) kicker.setPosition(KICKER_KICK);
-        waitMs(holdMs);
-
-        if (kicker != null) kicker.setPosition(KICKER_BASE);
-        if (blocker != null) blocker.setPosition(BLOCKER_CLOSED);
-        if (hood != null) hood.setPosition(HOOD_START);
-        intakeOff();
-        stopShooter();
-    }
-
-    public void aimAndShootAtGoal(double goalX, double goalY) {
-        intakeOff();
-        Pose currentPose = follower.pose();
-        double dx = goalX - currentPose.x();
-        double dy = goalY - currentPose.y();
-        double targetHeadingDeg = Math.toDegrees(Math.atan2(dy, dx));
-
-        // Rotate in place to face goal target
-        Pose aimedPose = PoseFactory.degrees().of(currentPose.x(), currentPose.y(), targetHeadingDeg);
-        followPath(line(currentPose, aimedPose).linear(currentPose, aimedPose));
-
-        // Execute shooting sequence
-        shootRings(300, KICK_DELAY_MS, SHOOT_HOLD_MS);
-    }
-
-    // ── Hardware Initialization & Cleanup ────────────────────────────────────
 
     private void initHardware() {
         // Configure Shooter Motors

@@ -69,6 +69,7 @@ public class AutoBallHunterGrid extends LinearOpMode {
     // ── Goal Target Coordinates for Autonomous Shooting ──────────────────────
     public static final double GOAL_X = 62.6852;
     public static final double GOAL_Y = 86.5374;
+    public static final double SHOOTER_HEADING_OFFSET_DEG = 180.0;
 
     // ── Hardware Declarations (From TeleOps) ─────────────────────────────────
     private DcMotor frontLeft, frontRight, backLeft, backRight;
@@ -433,9 +434,13 @@ public class AutoBallHunterGrid extends LinearOpMode {
         Pose currentPose = follower.pose();
         double dx = goalX - currentPose.x();
         double dy = goalY - currentPose.y();
-        double targetHeadingDeg = Math.toDegrees(Math.atan2(dy, dx));
 
-        // Rotate in place to face goal target
+        // Calculate heading with shooter 180° offset
+        double targetHeadingDeg = Math.toDegrees(Math.atan2(dy, dx)) + SHOOTER_HEADING_OFFSET_DEG;
+        while (targetHeadingDeg > 180)  targetHeadingDeg -= 360;
+        while (targetHeadingDeg < -180) targetHeadingDeg += 360;
+
+        // Rotate in place to face goal target with shooter
         Pose aimedPose = pFactory.of(currentPose.x(), currentPose.y(), targetHeadingDeg);
         scheduleRoute(currentPose, aimedPose);
 
