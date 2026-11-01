@@ -6,34 +6,45 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // intake, servos and sensor are plain hardware.
 //
 // CHANGE SUMMARY (this revision):
-//   + LIMELIGHT RELOCALIZATION AT THE SHOOTING SPOT. When gamepad 1 R2 auto-drive ARRIVES,
-//     the robot's Pedro pose is reset ONCE from the Limelight AprilTags, BEFORE any ball is shot.
-//   + ALL 16 TAGS now usable (taken from LimelightReset.TAGS), but ONLY the 4 tags that belong
-//     to the current alliance + preset are used for each reset:
-//         RED  preset 0 -> tags 34,35,36,37
-//         RED  preset 1 -> tags 30,31,32,33
-//         BLUE preset 0 -> tags 38,39,40,41
-//         BLUE preset 1 -> tags 42,43,44,45
-//     (Red 1 is 30-33 to match the LimelightReset table / field map. You typed 31,32,33,34 -
-//      34 is a RED 0 tag, so I assumed typo. To change, edit RED_1_TAGS below.)
-//     Alliance comes from the INIT dpad pick; preset comes from gamepad 1 B. Tags are looked up
-//     live, so switching preset switches the tag set automatically.
-//   + New helper estimateFromTags(): same math as LimelightReset.estimate() but skips every tag
-//     not in the allowed set. LimelightReset.java is NOT modified (uses its public TAGS table and
-//     tagRobotSpaceInches()).
-//   + Reset happens ONCE per arrival. Flow after ARRIVED:
-//        1. wait LL_SETTLE_MS (robot stops moving, camera frame matches pose)
-//        2. read latest Limelight result, filter to allowed tags, estimate x/y
-//        3. setPose(x, y, ODOMETRY heading) (heading is kept from Pedro, like LimelightReset says)
-//        4. wait RESET_SETTLE_MS so the hold re-converges, THEN aimLocked may go true -> shooting
-//        If no allowed tag is seen within LL_TIMEOUT_MS, it gives up (no reset) and shooting
-//        proceeds anyway so a hidden tag never blocks a shot.
-//     Auto-shoot (gamepad 1 R2 -> ARRIVED -> aimLocked) cannot fire until step 4 is done.
-//     Manual shooting with gamepad 2 R2 is untouched (no reset, fires immediately as before).
-//   + Safety gate MAX_JUMP_IN: a camera fix more than 30 in from current odometry is rejected
-//     (bad frame). Set it to 999 to disable.
-//   + Limelight started in init() via LimelightReset.init() (pipeline 5), stopped in stop().
-//   + Telemetry shows allowed tag IDs, tags seen, and reset status per arrival.
+//   * RELOCALIZATION NOW USES MEGATAG 1 (MT1) INSTEAD OF MEGATAG 2.
+//     - Pose comes from result.getBotpose() (MT1) instead of getBotpose_MT2().
+//     - MT1 solves its own heading from the tags, so updateRobotOrientation() is GONE
+//       (it was only needed by MT2).
+//     - The MT2 offset-finder corrections (MT2_CORR_X / MT2_CORR_Y) are REMOVED: they were
+//       measured for MT2's pose and do not apply to MT1. If MT1 shows a steady offset vs
+//       odometry, re-run the offset finder with MT1 and add new corrections.
+//     - NEW LL_MIN_TAGS constant: how many allowed tags must be in view to accept a frame.
+//       Default 1 (same as before). MT1 with a single tag can flip to a mirrored pose, so
+//       set it to 2 if you see occasional bad resets.
+//     - Reset still only takes x/y from the camera; heading stays odometry's.
+//   + botpose -> Pedro: x/y + 72 (map origin is field center), same toPedro() as before.
+//   + setPose(MT1 x, MT1 y, ODOMETRY heading). After that the odo pods keep
+//     tracking from that pose - the camera is only used for the one reset.
+//   + TAG FILTER LIVES IN THE LIMELIGHT: one pipeline per alliance + preset, each with its tag
+//     ID filter set in the Limelight web UI, so MT1 only ever uses that set's 4 tags:
+//         RED  preset 0 -> pipeline 5 -> tags 34,35,36,37
+//         RED  preset 1 -> pipeline 4 -> tags 30,31,32,33
+//         BLUE preset 0 -> pipeline 3 -> tags 38,39,40,41
+//         BLUE preset 1 -> pipeline 2 -> tags 42,43,44,45
+//     The TeleOp picks the pipeline from alliance (INIT dpad) + preset (gamepad 1 B) and
+//     enforcePipeline() keeps re-sending the switch until the camera reports it. A frame is only
+//     used when the camera reports the CORRECT pipeline for the current alliance + preset.
+//     The allowed-tag check in code stays as a sanity check (>= LL_MIN_TAGS tag(s) from the set in view).
+//     NOTE: the pipelines must be AprilTag pipelines with the field map loaded so MT1 botpose works.
+//   + MANUAL RESET KEPT: gamepad 1 X still snaps odometry to the alliance/preset reset pose
+//     (robot on the reset spot). Works any time the driver has control.
+//   + TELEMETRY SHOWS BOTH POSES, ALWAYS (INIT and loop, not only at the shooting spot):
+//        ODOMETRY  = where the odo pods think the robot is
+//        LIMELIGHT = where the camera thinks it is (MT1, current pipeline), or WHY there is none
+//        DIFF      = camera minus odometry (x, y, distance) so you can see how far apart they are
+//     The camera is only READ for display; only the arrival reset (below) writes to the pose.
+//   + AUTO_LL_RESET switch (top constants): true = reset at the shooting spot (default),
+//     false = never touch the pose from the camera, display only. Use false to compare freely.
+//   + Reset still happens ONCE per arrival at the shooting spot, BEFORE shooting:
+//     wait LL_SETTLE_MS -> read MT1 -> setPose -> wait RESET_SETTLE_MS -> aim lock may go
+//     true -> auto-shoot. No allowed tag within LL_TIMEOUT_MS = skip reset and shoot anyway.
+//     Gamepad 2 R2 manual shooting is untouched.
+//   + MAX_JUMP_IN (30 in) rejects a camera fix too far from odometry. 999 = off.
 //   + Everything else (drive, shooter, intake, kicker, dodging, aim lock) is unchanged.
 //
 // HARDWARE (names must match the Robot Configuration on the Driver Hub)
@@ -44,7 +55,7 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // 1x blocker servo — blocker (OPEN while shooting, CLOSED otherwise)
 // 1x kicker servo — kicker (BASE / KICK — pushes last ball up)
 // 1x Prism light — prism (GoBilda Prism driver, status animations)
-// 1x Limelight 3A — name set by LimelightReset.LIMELIGHT_NAME (currently "orange")
+// 1x Limelight 3A — named by LIMELIGHT_NAME below (must match the Robot Configuration)
 //
 // ALLIANCE / PRESET SELECTION
 // During INIT (before PLAY), gamepad 1:
@@ -137,8 +148,11 @@ import com.qualcomm.robotcore.hardware.Servo;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
+import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.CurrentUnit;
-import org.firstinspires.ftc.teamcode.Limelight.LimelightReset; // NEW: tag table + robot-space helper
+import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
+import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
+import org.firstinspires.ftc.robotcore.external.navigation.Position;
 import org.firstinspires.ftc.teamcode.Prism.GoBildaPrismDriver;
 import org.firstinspires.ftc.teamcode.pedro.Constants;
 
@@ -179,9 +193,6 @@ public class AutoShootDodgeRange extends OpMode {
 
     // Each array has two presets: [0] = default, [1] = alternate (gamepad 1 B).
 // SHOOT = R2 auto-drive target. RESET = where X resets the pose to.
-//
-// TODO: fill in the real coordinates. Preset 0 currently holds the old
-// values as a stand-in, preset 1 is empty (0, 0, 0).
     public static final Pose[] RED_SHOOT_POSES = {
             p.of(56, 14, -90), // RED preset 0 shooting pose
             p.of(56, 130, 90) // RED preset 1 shooting pose
@@ -200,20 +211,33 @@ public class AutoShootDodgeRange extends OpMode {
             p.of(135.25, 136, 90) // BLUE preset 1 reset pose
     };
 
-    // ── Limelight tag sets (NEW) ─────────────────────────────────────────────
+    // ── Limelight tag sets ───────────────────────────────────────────────────
 // Only these 4 tags are used for the relocalization, chosen by alliance + preset.
-// IDs match LimelightReset.TAGS (all 16 tags live there).
+// All 16 tags are covered across the four sets.
     private static final int[] RED_0_TAGS  = {34, 35, 36, 37};
     private static final int[] RED_1_TAGS  = {30, 31, 32, 33}; // you typed 31-34; 34 is a RED 0 tag, so 30-33 used
     private static final int[] BLUE_0_TAGS = {38, 39, 40, 41};
     private static final int[] BLUE_1_TAGS = {42, 43, 44, 45};
 
-    // ── Limelight relocalization tuning (NEW) ────────────────────────────────
+    // ── Limelight relocalization tuning ──────────────────────────────────────
     private static final long   LL_SETTLE_MS    = 200;  // after ARRIVED, wait this long before reading the camera (robot stopped)
     private static final long   LL_TIMEOUT_MS   = 700;  // measured from ARRIVED; no allowed tag by then -> skip reset, shoot anyway
     private static final long   LL_MAX_STALE_MS = 100;  // ignore camera frames older than this
     private static final long   RESET_SETTLE_MS = 250;  // after setPose, let the hold re-converge before aimLocked can go true
+    private static final boolean AUTO_LL_RESET  = true; // false = camera is display-only, pose is never changed by it
     private static final double MAX_JUMP_IN     = 30.0; // reject a camera fix this far from odometry (bad frame). 999 = off
+    // MT1 only: how many allowed tags must be in view to accept a frame. MT1 with ONE tag can flip to a
+    // mirrored pose, so set this to 2 if you see occasional bad resets.
+    private static final int    LL_MIN_TAGS     = 1;
+
+    // Camera setup (MegaTag 1 - no robot orientation needed, no MT2 offset corrections)
+    private static final String LIMELIGHT_NAME = "orange"; // change if the Robot Configuration names it differently
+    // One Limelight pipeline per alliance + preset; each pipeline's tag ID filter is set in the Limelight web UI
+    private static final int    RED_0_PIPELINE  = 5; // tags 34,35,36,37
+    private static final int    RED_1_PIPELINE  = 4; // tags 30,31,32,33
+    private static final int    BLUE_0_PIPELINE = 3; // tags 38,39,40,41
+    private static final int    BLUE_1_PIPELINE = 2; // tags 42,43,44,45
+    private static final double LL_CENTER      = 72.0;   // map origin = field center, so pedro = limelight inches + 72
 
     // ── Goals + free-shooting zones ──────────────────────────────────────────
 // Preset 0 = bottom goal, preset 1 = top goal. {x, y} in field inches.
@@ -262,7 +286,7 @@ public class AutoShootDodgeRange extends OpMode {
     private final ElapsedTime arrivedTimer = new ElapsedTime();
     private final ElapsedTime reaimTimer = new ElapsedTime();
 
-    // ── Limelight state (NEW) ────────────────────────────────────────────────
+    // ── Limelight state ──────────────────────────────────────────────────────
     private Limelight3A limelight;
     private boolean llDone = false;               // true once this arrival's reset attempt is finished (success OR gave up)
     private boolean llApplied = false;            // true if the pose was actually reset this arrival
@@ -270,6 +294,7 @@ public class AutoShootDodgeRange extends OpMode {
     private final ElapsedTime resetSettleTimer = new ElapsedTime(); // time since setPose
     private String llStatus = "-";
     private int llTagsSeen = 0;                   // allowed tags in view on the last attempt
+    private long lastSwitchMs = 0;                // for enforcePipeline() throttling
 
     private Alliance alliance = Alliance.RED;
     private int presetIndex = 0; // 0 or 1, toggled by gamepad 1 B
@@ -292,8 +317,6 @@ public class AutoShootDodgeRange extends OpMode {
 // If the line would clip one, it plans a detour around the (padded) corners
 // instead. A rectangle left as {0, 0, 0, 0} is ignored, so the drive is
 // unchanged until you fill them in.
-//
-// TODO: fill in the real coordinates for both structures.
     public static final double[][] KEEP_OUT_ZONES = {
             {45, 50, 49, 91}, // STRUCTURE 1 {minX, minY, maxX, maxY}
             {91, 50, 96, 91} // STRUCTURE 2 {minX, minY, maxX, maxY}
@@ -460,13 +483,13 @@ public class AutoShootDodgeRange extends OpMode {
         return angleDiff(now.heading(), headingToGoal(now.x(), now.y()));
     }
 
-    /** CHANGED: also arms the Limelight relocalization for this arrival (llDone=false, timers restarted). */
+    /** Also arms the Limelight relocalization for this arrival (llDone=false, timers restarted). */
     private void enterArrived() {
         alignState = AlignState.ARRIVED;
         aimLocked = false;
         arrivedTimer.reset();
         reaimTimer.reset();
-        // NEW: one fresh Limelight reset attempt per arrival
+        // One fresh Limelight reset attempt per arrival
         llDone = false;
         llApplied = false;
         llStatus = "waiting to settle";
@@ -484,7 +507,7 @@ public class AutoShootDodgeRange extends OpMode {
     }
 
 // ═════════════════════════════════════════════════════════════════════════
-// Limelight relocalization (NEW)
+// Limelight relocalization (MegaTag 1)
 // ═════════════════════════════════════════════════════════════════════════
 
     /** The 4 tag IDs allowed for the current alliance + preset. */
@@ -498,6 +521,12 @@ public class AutoShootDodgeRange extends OpMode {
         return false;
     }
 
+    /** Limelight pipeline for the current alliance + preset (its tag filter = allowedTagIds()). */
+    private int desiredPipeline() {
+        if (alliance == Alliance.RED) return presetIndex == 0 ? RED_0_PIPELINE : RED_1_PIPELINE;
+        return presetIndex == 0 ? BLUE_0_PIPELINE : BLUE_1_PIPELINE;
+    }
+
     /** "34,35,36,37" style string for telemetry. */
     private String allowedTagText() {
         int[] ids = allowedTagIds();
@@ -509,48 +538,104 @@ public class AutoShootDodgeRange extends OpMode {
         return sb.toString();
     }
 
-    /** Field position of a tag from LimelightReset's table (all 16 tags), or null if unknown. */
-    private static double[] tagRow(int id) {
-        for (double[] row : LimelightReset.TAGS) {
-            if ((int) row[0] == id && id >= 0) return row;
+    private static double wrapDeg(double deg) {
+        return Math.toDegrees(Math.atan2(Math.sin(Math.toRadians(deg)), Math.cos(Math.toRadians(deg))));
+    }
+
+    /** Converts a Limelight botpose to {pedroX, pedroY, headingDeg}, or null if no real solution. */
+    private static double[] toPedro(Pose3D bp) {
+        if (bp == null) return null;
+        Position pos = bp.getPosition().toUnit(DistanceUnit.INCH);
+        // Limelight returns exactly (0,0,0) when it can't solve
+        if (pos.x == 0 && pos.y == 0 && pos.z == 0) return null;
+        return new double[] {
+                pos.x + LL_CENTER,
+                pos.y + LL_CENTER,
+                wrapDeg(bp.getOrientation().getYaw(AngleUnit.DEGREES))
+        };
+    }
+
+    /** Re-send the pipeline switch if the camera isn't on the pipeline for the current alliance + preset yet. */
+    private void enforcePipeline(LLResult result) {
+        int want = desiredPipeline();
+        if (result == null || result.getPipelineIndex() == want) return;
+        long now = System.currentTimeMillis();
+        if (now - lastSwitchMs > 250) { // don't spam it every loop
+            limelight.pipelineSwitch(want);
+            lastSwitchMs = now;
         }
-        return null;
     }
 
     /**
-     * Same math as LimelightReset.estimate(), but ONLY tags whose ID is in 'allowed' count.
-     * Every allowed tag in view gives its own robot-center estimate; they are averaged.
-     * Heading is NOT solved - pass Pedro's heading (radians) and keep it when resetting.
-     *
-     * @return { x, y, numberOfAllowedTagsUsed } or null if none of the allowed tags were usable
+     * The pose the Limelight returns (MegaTag 1), in Pedro inches {x, y, camHeadingDeg},
+     * or null if this frame can't be used. A frame is usable only if it is fresh, on the pipeline for the current
+     * alliance + preset (that pipeline's tag filter keeps other sets out of the pose), and has >= LL_MIN_TAGS allowed tag(s).
+     * Sets llStatus / llTagsSeen so telemetry says why a frame was skipped.
      */
-    private double[] estimateFromTags(LLResult result, double headingRad, int[] allowed) {
-        if (result == null || !result.isValid()) return null;
+    private double[] readAllowedMt1(LLResult result) {
+        llTagsSeen = 0;
+        if (result == null || !result.isValid()) { llStatus = "no valid camera result"; return null; }
+        if (result.getPipelineIndex() != desiredPipeline()) { llStatus = "camera switching to pipeline " + desiredPipeline(); return null; }
+        if (result.getStaleness() > LL_MAX_STALE_MS) { llStatus = "camera data too old"; return null; }
+
         List<LLResultTypes.FiducialResult> seen = result.getFiducialResults();
-        if (seen == null || seen.isEmpty()) return null;
-
-        double cos = Math.cos(headingRad), sin = Math.sin(headingRad);
-        double sumX = 0, sumY = 0;
-        int used = 0;
-
-        for (LLResultTypes.FiducialResult fr : seen) {
-            int id = fr.getFiducialId();
-            if (!contains(allowed, id)) continue;          // <-- the filter: other alliance / other preset tags ignored
-            double[] tag = tagRow(id);
-            if (tag == null) continue;
-
-            double[] t = LimelightReset.tagRobotSpaceInches(fr); // { forward, right, up } from robot CENTER
-            if (t == null) continue;
-            double f = t[0];   // forward
-            double r = t[1];   // right
-
-            // Field: forward = (cos, sin), right = (sin, -cos). tagField = center + f*fwd + r*right.
-            sumX += tag[1] - f * cos - r * sin;
-            sumY += tag[2] - f * sin + r * cos;
-            used++;
+        int[] allowed = allowedTagIds();
+        int ok = 0;
+        if (seen != null) {
+            for (LLResultTypes.FiducialResult fr : seen) {
+                if (contains(allowed, fr.getFiducialId())) ok++;
+            }
         }
-        if (used == 0) return null;
-        return new double[]{ sumX / used, sumY / used, used };
+        llTagsSeen = ok;
+        if (ok == 0) { llStatus = "no allowed tag in view"; return null; }
+        if (ok < LL_MIN_TAGS) { llStatus = "only " + ok + " allowed tag(s), need " + LL_MIN_TAGS; return null; }
+
+        double[] mt1 = toPedro(result.getBotpose()); // MegaTag 1 botpose (solves its own heading from the tags)
+        if (mt1 == null) { llStatus = "MT1 has no solution"; return null; }
+        return mt1;
+    }
+
+    private String liveLLReason = "-"; // why the live camera pose is unavailable (telemetry only)
+
+    /**
+     * Camera pose for DISPLAY: same MT1 pose the reset uses, but leaves llStatus / llTagsSeen
+     * (the reset's own status) untouched. Returns null and sets liveLLReason when unavailable.
+     */
+    private double[] liveCameraPose() {
+        String keepStatus = llStatus;
+        int keepTags = llTagsSeen;
+        double[] r = readAllowedMt1(limelight.getLatestResult());
+        liveLLReason = llStatus;
+        llStatus = keepStatus;
+        llTagsSeen = keepTags;
+        return r;
+    }
+
+    /** Adds the ODOMETRY / LIMELIGHT / DIFF telemetry lines (does not call telemetry.update()). */
+    private void addPoseTelemetry() {
+        Pose o = follower.pose();
+        telemetry.addData("ODOMETRY (pods)", "x=%.1f y=%.1f h=%.1f deg",
+                o.x(), o.y(), wrapDeg(Math.toDegrees(o.heading())));
+        double[] cam = liveCameraPose();
+        if (cam == null) {
+            telemetry.addData("LIMELIGHT (MT1)", "no pose: %s", liveLLReason);
+        } else {
+            telemetry.addData("LIMELIGHT (MT1)", "x=%.1f y=%.1f h=%.1f (%d allowed tag(s), pipeline %d)",
+                    cam[0], cam[1], cam[2], llLiveTags(), desiredPipeline());
+            telemetry.addData("  LL minus ODO", "dx=%.1f dy=%.1f dist=%.1f in",
+                    cam[0] - o.x(), cam[1] - o.y(), Math.hypot(cam[0] - o.x(), cam[1] - o.y()));
+        }
+    }
+
+    /** Allowed-tag count of the latest camera frame (display only). */
+    private int llLiveTags() {
+        LLResult r = limelight.getLatestResult();
+        if (r == null || r.getFiducialResults() == null) return 0;
+        int n = 0;
+        for (LLResultTypes.FiducialResult fr : r.getFiducialResults()) {
+            if (contains(allowedTagIds(), fr.getFiducialId())) n++;
+        }
+        return n;
     }
 
     /**
@@ -558,6 +643,10 @@ public class AutoShootDodgeRange extends OpMode {
      * Returns true while the robot must NOT shoot yet (still resetting / settling).
      */
     private boolean relocalizeStep() {
+        if (!AUTO_LL_RESET) { // display-only mode: never write the camera pose, never delay shooting
+            llStatus = "auto reset OFF (display only)";
+            return false;
+        }
         // Already finished this arrival: only the post-reset settle can still be pending.
         if (llDone) {
             return llApplied && resetSettleTimer.milliseconds() < RESET_SETTLE_MS;
@@ -570,29 +659,22 @@ public class AutoShootDodgeRange extends OpMode {
         }
 
         Pose now = follower.pose();
-        LLResult result = limelight.getLatestResult();
-        double[] est = null;
-        if (result != null && result.isValid() && result.getStaleness() <= LL_MAX_STALE_MS) {
-            est = estimateFromTags(result, now.heading(), allowedTagIds());
-        }
+        double[] est = readAllowedMt1(limelight.getLatestResult());
 
         if (est != null) {
-            llTagsSeen = (int) est[2];
             double jump = Math.hypot(est[0] - now.x(), est[1] - now.y());
             if (jump <= MAX_JUMP_IN) {
-                // Keep Pedro's heading (tags only fix x/y here); then the hold + re-aim loop re-converge.
+                // Camera gives x/y; heading stays odometry's.
+                // From here the odo pods keep tracking from this corrected pose.
                 follower.setPose(p.of(est[0], est[1], Math.toDegrees(now.heading())));
                 llApplied = true;
                 llDone = true;
                 resetSettleTimer.reset();
                 arrivedTimer.reset(); // aim "late" window starts now, not at arrival
-                llStatus = String.format("RESET using %d tag(s), moved %.1f in", llTagsSeen, jump);
+                llStatus = String.format("RESET from MT1 (%d allowed tag(s)), moved %.1f in", llTagsSeen, jump);
                 return true; // settle before shooting
             }
             llStatus = String.format("rejected: jump %.1f in > %.0f", jump, MAX_JUMP_IN);
-        } else {
-            llTagsSeen = 0;
-            llStatus = "no allowed tag in view";
         }
 
         // Nothing usable yet: keep trying until the timeout, then give up so shooting is never blocked.
@@ -627,8 +709,11 @@ public class AutoShootDodgeRange extends OpMode {
         llDone = false;
         llApplied = false;
 
-// NEW: Limelight on the AprilTag pipeline (pipeline 5), started.
-        limelight = LimelightReset.init(hardwareMap);
+// Limelight straight from the hardware map, starting on the pipeline for the default alliance + preset.
+        limelight = hardwareMap.get(Limelight3A.class, LIMELIGHT_NAME);
+        limelight.setPollRateHz(100);
+        limelight.start();
+        limelight.pipelineSwitch(desiredPipeline());
 
         prism = hardwareMap.get(GoBildaPrismDriver.class, "prism");
         prism.loadAnimationsFromArtboard(GoBildaPrismDriver.Artboard.ARTBOARD_0);
@@ -688,7 +773,7 @@ public class AutoShootDodgeRange extends OpMode {
 // Keep the starting pose in sync with the chosen side.
         follower.setPose(originPose());
 
-        telemetry.addLine("Gamepad 1: dpad UP = RED | dpad DOWN = BLUE");
+        telemetry.addLine("Gamepad 1: dpad UP = RED | dpad DOWN = BLUE | X = manual pose reset");
         telemetry.addData("Alliance", alliance);
         Pose o = originPose();
         Pose s = idealPose();
@@ -696,7 +781,9 @@ public class AutoShootDodgeRange extends OpMode {
                 o.x(), o.y(), Math.toDegrees(o.heading()));
         telemetry.addData("Shoot pose", "x=%.1f y=%.1f heading=%.0f deg",
                 s.x(), s.y(), Math.toDegrees(s.heading()));
-        telemetry.addData("Limelight reset tags", allowedTagText()); // NEW
+        addPoseTelemetry(); // check the camera sees the tags before the match starts
+        enforcePipeline(limelight.getLatestResult()); // keep asking for the chosen side's pipeline during INIT
+        telemetry.addData("Limelight reset tags / pipeline", "%s / %d", allowedTagText(), desiredPipeline());
         telemetry.update();
     }
 
@@ -706,6 +793,7 @@ public class AutoShootDodgeRange extends OpMode {
         follower.setPose(originPose());
         alignTarget = idealPose();
         gameTimer.reset(); // game-long shooter ramp starts at PLAY
+        limelight.pipelineSwitch(desiredPipeline()); // ask again for the chosen side's pipeline once PLAY starts
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -719,6 +807,10 @@ public class AutoShootDodgeRange extends OpMode {
             prism.loadAnimationsFromArtboard(GoBildaPrismDriver.Artboard.ARTBOARD_0);
             currentArtboardState = 0;
         }
+
+// MT1 does not need the robot heading (that was MT2 only), so there is no updateRobotOrientation() here.
+// The camera just has to be on the pipeline for the current alliance + preset.
+        enforcePipeline(limelight.getLatestResult());
 
 // Loop time, so you can see what a pass actually costs.
         loopMs = loopTimer.milliseconds();
@@ -888,9 +980,8 @@ public class AutoShootDodgeRange extends OpMode {
         telemetry.addData("Linkage", linkageUp ? "UP" : "DOWN");
         telemetry.addLine("---");
         telemetry.addData("Alliance / preset", "%s #%d", alliance, presetIndex);
-        Pose pose = follower.pose();
         telemetry.addData("Align", "%s busy=%b mode=%s", alignState, follower.isBusy(), follower.mode());
-        telemetry.addData("Pose", "x=%.1f y=%.1f heading=%.0f deg", pose.x(), pose.y(), Math.toDegrees(pose.heading()));
+        addPoseTelemetry(); // ODOMETRY vs LIMELIGHT vs difference, always on
         telemetry.addData("Distance to goal", "center %.1f in / shooter %.1f in",
                 distanceToGoal(), distanceToGoal() - SHOOTER_OFFSET_IN);
         telemetry.addData("Aim error", "%.2f deg %s", Math.toDegrees(aimErrorRad()),
@@ -899,8 +990,8 @@ public class AutoShootDodgeRange extends OpMode {
                 alignTarget.x(), alignTarget.y(), Math.toDegrees(alignTarget.heading()));
         telemetry.addData("Route", alignState == AlignState.MANUAL ? "-" :
                 (routeCorners > 0 ? "curving around structures (" + routeCorners + " guide pts)" : "straight"));
-        // NEW: Limelight reset status
-        telemetry.addData("LL tags allowed", allowedTagText());
+        // Limelight reset status
+        telemetry.addData("LL tags / pipeline", "%s / %d", allowedTagText(), desiredPipeline());
         telemetry.addData("LL reset", alignState == AlignState.ARRIVED ? llStatus : "- (only at shooting spot)");
 
         telemetry.update();
@@ -919,7 +1010,7 @@ public class AutoShootDodgeRange extends OpMode {
         setLinkagePosition(LINKAGE_DOWN);
         blocker.setPosition(BLOCKER_CLOSED);
         kicker.setPosition(KICKER_BASE);
-        if (limelight != null) limelight.stop(); // NEW
+        if (limelight != null) limelight.stop();
     }
 
     private void setLinkagePosition(double position) {
@@ -1002,7 +1093,7 @@ public class AutoShootDodgeRange extends OpMode {
                     break;
                 }
 
-// NEW: Limelight relocalization comes FIRST. Until it is finished (reset done + settled,
+// Limelight relocalization comes FIRST. Until it is finished (reset done + settled,
 // or timed out with no tag) aim-lock stays false, so auto-shoot cannot fire yet.
                 if (relocalizeStep()) {
                     aimLocked = false;

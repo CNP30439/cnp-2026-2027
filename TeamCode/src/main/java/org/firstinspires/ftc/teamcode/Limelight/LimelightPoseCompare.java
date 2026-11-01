@@ -2,16 +2,16 @@ package org.firstinspires.ftc.teamcode.Limelight;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // LimelightPoseCompare.java — TeleOp. Full robot pose from MegaTag, compared
-// side by side with Pedro odometry. Pipeline 5, tags 34-37 (biobuzz_4tags_tilt60.fmap).
+// side by side with Pedro odometry. All 16 tags via 4 switchable pipelines.
+//
+//   Red 0  = pipeline 5 = tags 34-37
+//   Red 1  = pipeline 4 = tags 30-33
+//   Blue 0 = pipeline 3 = tags 38-41
+//   Blue 1 = pipeline 2 = tags 42-45
 //
 // CHANGE SUMMARY (this revision):
-//   + Added MT2_CORR_X / MT2_CORR_Y constants (from MT2 Offset Finder, 9 readings,
-//     model: Fixed shift). X = +2.478 in, Y = -1.067 in.
-//   + In loop(): after mt2 is computed from the camera, the correction is added to
-//     mt2[0] / mt2[1] (null-guarded). Because it's applied right there, EVERYTHING
-//     downstream uses the corrected MT2: the "off by" telemetry AND the dpad UP snap.
-//   + MT1 is NOT corrected (offset finder was MT2 only).
-//   + Everything else is unchanged.
+//   - Removed the MT2 correction (MT2_CORR_X / MT2_CORR_Y). MT2 is now raw.
+//   + Left/right bumper cycles the active pipeline (works in INIT and RUN).
 //
 // The map was built in Pedro inches with the field center at (72, 72), so:
 // pedroX = limelightX(in) + 72
@@ -23,13 +23,15 @@ package org.firstinspires.ftc.teamcode.Limelight;
 //
 // HOW TO USE (gamepad 1):
 // 1. Put robot on the reset spot, press X (odometry = 7.25, 8, -90).
-// 2. Drive around where the camera can see tags 34-37.
-// 3. Compare the "off by" numbers. Good = within ~1-2 in and ~2 deg.
-// 4. Stop and hold still for best readings (moving adds blur + lag).
+// 2. Pick the pipeline for the tags you're facing (bumpers).
+// 3. Drive around where the camera can see those tags.
+// 4. Compare the "off by" numbers. Good = within ~1-2 in and ~2 deg.
+// 5. Stop and hold still for best readings (moving adds blur + lag).
 //
 // left stick — drive / strafe right stick X — rotate
+// right bumper — next pipeline left bumper — previous pipeline
 // X — reset odometry to (7.25, 8, -90)
-// dpad UP — snap odometry to the (corrected) MT2 camera pose (only if a tag is seen)
+// dpad UP — snap odometry to the MT2 camera pose (only if a tag is seen)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import com.qualcomm.hardware.limelightvision.LLResult;
@@ -50,8 +52,15 @@ import com.pedropathing.math.Pose;
 @TeleOp(name = "LimelightPoseCompare", group = "TeleOp")
 public class LimelightPoseCompare extends OpMode {
 
-    private static final int PIPELINE = 5;
-    private static final String LIMELIGHT_NAME = "limelight";
+    // ── Pipeline table (index order = bumper cycle order) ────────────────────
+    private static final int[]    PIPELINES = {5, 4, 3, 2};
+    private static final String[] SET_NAMES = {"Red 0", "Red 1", "Blue 0", "Blue 1"};
+    private static final String[] TAG_RANGE = {"34-37", "30-33", "38-41", "42-45"};
+    private int currentIdx = 0; // starts on Red 0 (pipeline 5)
+
+    private int pipeline() { return PIPELINES[currentIdx]; }
+
+    private static final String LIMELIGHT_NAME = "orange";
     private static final boolean USE_HELPER = false; // true = use LimelightReset.init() like before
 
     private boolean lastSwitchOk = false;
@@ -61,10 +70,6 @@ public class LimelightPoseCompare extends OpMode {
     // Field center in Pedro inches (map origin)
     private static final double CENTER = 72.0;
 
-    // MT2 correction from MT2 Offset Finder (9 readings, model: Fixed shift)  [NEW]
-    private static final double MT2_CORR_X = 2.478;  // inches added to MT2 x
-    private static final double MT2_CORR_Y = -1.067; // inches added to MT2 y
-
     private static final PoseFactory p = PoseFactory.degrees();
     private static final Pose RESET_POSE = p.of(7.25, 8, -90);
     private static final double DRIVE_DEADZONE = 0.05;
@@ -72,6 +77,7 @@ public class LimelightPoseCompare extends OpMode {
     private Follower follower;
     private Limelight3A limelight;
     private boolean lastX = false, lastUp = false;
+    private boolean lastLB = false, lastRB = false;
 
     private static double wrapDeg(double deg) {
         return Math.toDegrees(Math.atan2(Math.sin(Math.toRadians(deg)), Math.cos(Math.toRadians(deg))));
@@ -90,6 +96,30 @@ public class LimelightPoseCompare extends OpMode {
         };
     }
 
+    /** Handles bumper presses to change the active pipeline. Call every loop (INIT and RUN). */
+    private void handlePipelineButtons() {
+        boolean rb = gamepad1.right_bumper;
+        boolean lb = gamepad1.left_bumper;
+        boolean changed = false;
+
+        if (rb && !lastRB) {
+            currentIdx = (currentIdx + 1) % PIPELINES.length;
+            changed = true;
+        }
+        if (lb && !lastLB) {
+            currentIdx = (currentIdx - 1 + PIPELINES.length) % PIPELINES.length;
+            changed = true;
+        }
+        lastRB = rb;
+        lastLB = lb;
+
+        if (changed) {
+            lastSwitchOk = limelight.pipelineSwitch(pipeline());
+            switchCount++;
+            lastSwitchMs = System.currentTimeMillis();
+        }
+    }
+
     @Override
     public void init() {
         follower = Constants.create(hardwareMap);
@@ -100,24 +130,26 @@ public class LimelightPoseCompare extends OpMode {
                 : hardwareMap.get(Limelight3A.class, LIMELIGHT_NAME);
         limelight.setPollRateHz(100);
         limelight.start();
-        lastSwitchOk = limelight.pipelineSwitch(PIPELINE);
+        lastSwitchOk = limelight.pipelineSwitch(pipeline());
         switchCount++;
-        telemetry.addLine("Pose compare ready. Press X on the reset spot, then drive near tags 34-37.");
+        telemetry.addLine("Pose compare ready. Bumpers = change pipeline. Press X on the reset spot, then drive near tags.");
         telemetry.update();
     }
 
     @Override
     public void start() {
         follower.setPose(RESET_POSE);
-        lastSwitchOk = limelight.pipelineSwitch(PIPELINE); // ask again once the OpMode starts
+        lastSwitchOk = limelight.pipelineSwitch(pipeline()); // ask again once the OpMode starts
         switchCount++;
     }
 
     // Keep asking during INIT too, so you can watch it switch before pressing Play
     @Override
     public void init_loop() {
+        handlePipelineButtons();
         LLResult r = limelight.getLatestResult();
         enforcePipeline(r);
+        telemetry.addData("SET", "%s (pipeline %d, tags %s)", SET_NAMES[currentIdx], pipeline(), TAG_RANGE[currentIdx]);
         telemetry.addData("pipeline in use", r == null ? "no result yet" : String.valueOf(r.getPipelineIndex()));
         telemetry.addData("switch requests sent", switchCount);
         telemetry.addData("last switch accepted", lastSwitchOk);
@@ -127,10 +159,10 @@ public class LimelightPoseCompare extends OpMode {
     // Re-send the pipeline switch if the camera isn't on the right one yet
     private long lastSwitchMs = 0;
     private void enforcePipeline(LLResult result) {
-        if (result == null || result.getPipelineIndex() == PIPELINE) return;
+        if (result == null || result.getPipelineIndex() == pipeline()) return;
         long now = System.currentTimeMillis();
         if (now - lastSwitchMs > 250) { // don't spam it every loop
-            lastSwitchOk = limelight.pipelineSwitch(PIPELINE);
+            lastSwitchOk = limelight.pipelineSwitch(pipeline());
             switchCount++;
             lastSwitchMs = now;
         }
@@ -138,6 +170,9 @@ public class LimelightPoseCompare extends OpMode {
 
     @Override
     public void loop() {
+        // ── Pipeline select ──────────────────────────────────────────────────
+        handlePipelineButtons();
+
         // ── Odometry ─────────────────────────────────────────────────────────
         Pose odo = follower.pose();
         double odoX = odo.x(); // if your Pose uses getX()/getY(), change these two
@@ -153,7 +188,7 @@ public class LimelightPoseCompare extends OpMode {
         double[] mt1 = null, mt2 = null;
         int tagCount = 0;
         long stale = -1;
-        if (result != null && result.isValid() && result.getPipelineIndex() == PIPELINE) {
+        if (result != null && result.isValid() && result.getPipelineIndex() == pipeline()) {
             stale = result.getStaleness();
             if (stale <= MAX_STALE_MS) {
                 tagCount = result.getFiducialResults() == null ? 0 : result.getFiducialResults().size();
@@ -162,13 +197,6 @@ public class LimelightPoseCompare extends OpMode {
                     mt2 = toPedro(result.getBotpose_MT2());
                 }
             }
-        }
-
-        // ── MT2 correction (NEW) ─────────────────────────────────────────────
-        // Applied once, right after mt2 is built, so telemetry + dpad UP snap both use corrected values.
-        if (mt2 != null) {
-            mt2[0] += MT2_CORR_X;
-            mt2[1] += MT2_CORR_Y;
         }
 
         // ── Buttons ──────────────────────────────────────────────────────────
@@ -191,14 +219,20 @@ public class LimelightPoseCompare extends OpMode {
         follower.update();
 
         // ── Telemetry ────────────────────────────────────────────────────────
+        telemetry.addData("SET", "%s (pipeline %d, tags %s)  [LB/RB to change]",
+                SET_NAMES[currentIdx], pipeline(), TAG_RANGE[currentIdx]);
         telemetry.addData("ODOMETRY", "x=%.1f y=%.1f h=%.1f", odoX, odoY, odoH);
 
         if (tagCount == 0) {
-            telemetry.addData("CAMERA", stale > MAX_STALE_MS ? "data too old (%d ms)" : "no tags 34-37 in view", stale);
+            if (stale > MAX_STALE_MS) {
+                telemetry.addData("CAMERA", "data too old (%d ms)", stale);
+            } else {
+                telemetry.addData("CAMERA", "no tags %s in view", TAG_RANGE[currentIdx]);
+            }
         } else {
             telemetry.addData("Tags seen", tagCount);
             showRow("MT1 (camera only)", mt1, odoX, odoY, odoH, true);
-            showRow("MT2 (camera + odo heading, corrected)", mt2, odoX, odoY, odoH, false);
+            showRow("MT2 (camera + odo heading)", mt2, odoX, odoY, odoH, false);
         }
         // ── Debug: what the camera is actually sending ───────────────────────
         telemetry.addLine("--- debug ---");
@@ -214,7 +248,7 @@ public class LimelightPoseCompare extends OpMode {
                     result.getFiducialResults() == null ? 0 : result.getFiducialResults().size());
             telemetry.addData("tx", "%.1f", result.getTx());
         }
-        telemetry.addLine("X = reset odo dpad UP = snap odo to MT2");
+        telemetry.addLine("X = reset odo dpad UP = snap odo to MT2 LB/RB = pipeline");
         telemetry.update();
     }
 
