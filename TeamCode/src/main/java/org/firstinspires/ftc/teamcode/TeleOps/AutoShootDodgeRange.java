@@ -5,6 +5,37 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // when idle + hold-R2 auto-drive to a fixed pose). Shooter,
 // intake, servos and sensor are plain hardware.
 //
+// CHANGE SUMMARY (this revision):
+//   + LIMELIGHT RELOCALIZATION AT THE SHOOTING SPOT. When gamepad 1 R2 auto-drive ARRIVES,
+//     the robot's Pedro pose is reset ONCE from the Limelight AprilTags, BEFORE any ball is shot.
+//   + ALL 16 TAGS now usable (taken from LimelightReset.TAGS), but ONLY the 4 tags that belong
+//     to the current alliance + preset are used for each reset:
+//         RED  preset 0 -> tags 34,35,36,37
+//         RED  preset 1 -> tags 30,31,32,33
+//         BLUE preset 0 -> tags 38,39,40,41
+//         BLUE preset 1 -> tags 42,43,44,45
+//     (Red 1 is 30-33 to match the LimelightReset table / field map. You typed 31,32,33,34 -
+//      34 is a RED 0 tag, so I assumed typo. To change, edit RED_1_TAGS below.)
+//     Alliance comes from the INIT dpad pick; preset comes from gamepad 1 B. Tags are looked up
+//     live, so switching preset switches the tag set automatically.
+//   + New helper estimateFromTags(): same math as LimelightReset.estimate() but skips every tag
+//     not in the allowed set. LimelightReset.java is NOT modified (uses its public TAGS table and
+//     tagRobotSpaceInches()).
+//   + Reset happens ONCE per arrival. Flow after ARRIVED:
+//        1. wait LL_SETTLE_MS (robot stops moving, camera frame matches pose)
+//        2. read latest Limelight result, filter to allowed tags, estimate x/y
+//        3. setPose(x, y, ODOMETRY heading) (heading is kept from Pedro, like LimelightReset says)
+//        4. wait RESET_SETTLE_MS so the hold re-converges, THEN aimLocked may go true -> shooting
+//        If no allowed tag is seen within LL_TIMEOUT_MS, it gives up (no reset) and shooting
+//        proceeds anyway so a hidden tag never blocks a shot.
+//     Auto-shoot (gamepad 1 R2 -> ARRIVED -> aimLocked) cannot fire until step 4 is done.
+//     Manual shooting with gamepad 2 R2 is untouched (no reset, fires immediately as before).
+//   + Safety gate MAX_JUMP_IN: a camera fix more than 30 in from current odometry is rejected
+//     (bad frame). Set it to 999 to disable.
+//   + Limelight started in init() via LimelightReset.init() (pipeline 5), stopped in stop().
+//   + Telemetry shows allowed tag IDs, tags seen, and reset status per arrival.
+//   + Everything else (drive, shooter, intake, kicker, dodging, aim lock) is unchanged.
+//
 // HARDWARE (names must match the Robot Configuration on the Driver Hub)
 // 4x drive motors — fl, fr, bl, br (mecanum)
 // 2x shooter motors — ls, rs (rs REVERSED so both spin the same way)
@@ -13,6 +44,7 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // 1x blocker servo — blocker (OPEN while shooting, CLOSED otherwise)
 // 1x kicker servo — kicker (BASE / KICK — pushes last ball up)
 // 1x Prism light — prism (GoBilda Prism driver, status animations)
+// 1x Limelight 3A — name set by LimelightReset.LIMELIGHT_NAME (currently "orange")
 //
 // ALLIANCE / PRESET SELECTION
 // During INIT (before PLAY), gamepad 1:
@@ -20,7 +52,7 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // dpad down — choose BLUE side
 // The choice shows in telemetry. Default is RED.
 // Each side has TWO presets (0 and 1). Each preset has its own
-// shooting pose (R2 auto-drive target) and its own reset pose (X button).
+// shooting pose (R2 auto-drive target), its own reset pose (X button), and its own 4 Limelight tags.
 // Preset 0 is the one you start on. Gamepad 1 B (press) toggles 0 <-> 1.
 // R2 no longer drives to a fixed spot: it drives to the NEAREST point inside
 // the shooting zone (preset 0: y<25, preset 1: y>116; x 25-85 red, 50-119 blue)
@@ -30,16 +62,17 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // Gamepad 1
 // left stick — drive / strafe
 // right stick X — rotate
-// B (press) — switch preset (changes BOTH the shooting pose and
-// the reset pose for the chosen alliance).
+// B (press) — switch preset (changes the shooting pose, the reset pose
+// AND the Limelight tag set for the chosen alliance).
 // R2 (hold) — auto-drive to the current shooting pose (turns
 // while it moves). Release R2 to cancel / take back control.
 // X — reset pose to the current reset pose (robot on the
 // reset spot, facing the same way). Ignored while aligning.
-// After R2 arrives — Pedro holds the target position while R2 is held.
+// After R2 arrives — Limelight relocalizes ONCE (allowed tags only), then Pedro
+// holds the target position while R2 is held.
 // Release R2 and you drive normally (no position hold).
-// AUTO-SHOOT: once it arrives, the robot also starts the
-// same shoot sequence as gamepad 2 R2 (below) for as long
+// AUTO-SHOOT: once it arrives AND the Limelight reset is done AND aim is locked,
+// the robot starts the same shoot sequence as gamepad 2 R2 (below) for as long
 // as you keep holding R2. The shooter must already be on
 // (gamepad 2 dpad up).
 //
@@ -47,8 +80,8 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // dpad up — toggle shooter on / off
 // dpad right — shooter HIGH velocity
 // dpad left — shooter LOW velocity
-// left bumper — decrease current mode's shooter velocity by 100 ticks/sec
-// right bumper — increase current mode's shooter velocity by 100 ticks/sec
+// left bumper — decrease current mode's shooter velocity by 50 ticks/sec
+// right bumper — increase current mode's shooter velocity by 50 ticks/sec
 // A — intake in (hold)
 // B — intake out (hold)
 // X — toggle linkage up / down
@@ -59,7 +92,7 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // and the kicker snaps straight back to BASE; the
 // delay resets fresh on every new R2 press.
 // Holding R2 also ramps the shooter up by +BOOST_MAX
-// ticks/sec over BOOST_RAMP_SECS (0.2s); releasing
+// ticks/sec over BOOST_RAMP_SECS; releasing
 // R2 ramps that boost back down over the same time.
 //
 // SHOOT SEQUENCE (while R2 held)
@@ -75,7 +108,7 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // Closed-loop velocity (ticks/sec) using PIDF gains from FlywheelTuner.
 // Left/right bumper nudge the current HIGH or LOW target by VELOCITY_STEP.
 // While R2 is held, shooter also gets a boost ramping up to +BOOST_MAX
-// ticks/sec over BOOST_RAMP_SECS (0.2s), ramping back down on release.
+// ticks/sec over BOOST_RAMP_SECS, ramping back down on release.
 // STRUCTURE DODGING: the R2 auto-drive avoids the two rectangles in
 // KEEP_OUT_ZONES, staying ROBOT_MARGIN (7 in, pose is the robot center) away
 // from their edges. If the straight line is clear it drives straight; if not
@@ -91,6 +124,9 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // Servos and Prism have no SDK voltage/current reading.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+import com.qualcomm.hardware.limelightvision.LLResult;
+import com.qualcomm.hardware.limelightvision.LLResultTypes;
+import com.qualcomm.hardware.limelightvision.Limelight3A;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotor;
@@ -102,6 +138,7 @@ import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
 import org.firstinspires.ftc.robotcore.external.navigation.CurrentUnit;
+import org.firstinspires.ftc.teamcode.Limelight.LimelightReset; // NEW: tag table + robot-space helper
 import org.firstinspires.ftc.teamcode.Prism.GoBildaPrismDriver;
 import org.firstinspires.ftc.teamcode.pedro.Constants;
 
@@ -140,7 +177,7 @@ public class AutoShootDodgeRange extends OpMode {
 // Chosen in INIT with gamepad 1 dpad up (RED) / dpad down (BLUE).
     private enum Alliance { RED, BLUE }
 
-    // Each array has two presets: [0] = default, [1] = alternate (gamepad 1 L2).
+    // Each array has two presets: [0] = default, [1] = alternate (gamepad 1 B).
 // SHOOT = R2 auto-drive target. RESET = where X resets the pose to.
 //
 // TODO: fill in the real coordinates. Preset 0 currently holds the old
@@ -162,6 +199,21 @@ public class AutoShootDodgeRange extends OpMode {
             p.of(135.25, 8, -90), // BLUE preset 0 reset pose
             p.of(135.25, 136, 90) // BLUE preset 1 reset pose
     };
+
+    // ── Limelight tag sets (NEW) ─────────────────────────────────────────────
+// Only these 4 tags are used for the relocalization, chosen by alliance + preset.
+// IDs match LimelightReset.TAGS (all 16 tags live there).
+    private static final int[] RED_0_TAGS  = {34, 35, 36, 37};
+    private static final int[] RED_1_TAGS  = {30, 31, 32, 33}; // you typed 31-34; 34 is a RED 0 tag, so 30-33 used
+    private static final int[] BLUE_0_TAGS = {38, 39, 40, 41};
+    private static final int[] BLUE_1_TAGS = {42, 43, 44, 45};
+
+    // ── Limelight relocalization tuning (NEW) ────────────────────────────────
+    private static final long   LL_SETTLE_MS    = 200;  // after ARRIVED, wait this long before reading the camera (robot stopped)
+    private static final long   LL_TIMEOUT_MS   = 700;  // measured from ARRIVED; no allowed tag by then -> skip reset, shoot anyway
+    private static final long   LL_MAX_STALE_MS = 100;  // ignore camera frames older than this
+    private static final long   RESET_SETTLE_MS = 250;  // after setPose, let the hold re-converge before aimLocked can go true
+    private static final double MAX_JUMP_IN     = 30.0; // reject a camera fix this far from odometry (bad frame). 999 = off
 
     // ── Goals + free-shooting zones ──────────────────────────────────────────
 // Preset 0 = bottom goal, preset 1 = top goal. {x, y} in field inches.
@@ -210,6 +262,15 @@ public class AutoShootDodgeRange extends OpMode {
     private final ElapsedTime arrivedTimer = new ElapsedTime();
     private final ElapsedTime reaimTimer = new ElapsedTime();
 
+    // ── Limelight state (NEW) ────────────────────────────────────────────────
+    private Limelight3A limelight;
+    private boolean llDone = false;               // true once this arrival's reset attempt is finished (success OR gave up)
+    private boolean llApplied = false;            // true if the pose was actually reset this arrival
+    private final ElapsedTime llTimer = new ElapsedTime();      // time since ARRIVED
+    private final ElapsedTime resetSettleTimer = new ElapsedTime(); // time since setPose
+    private String llStatus = "-";
+    private int llTagsSeen = 0;                   // allowed tags in view on the last attempt
+
     private Alliance alliance = Alliance.RED;
     private int presetIndex = 0; // 0 or 1, toggled by gamepad 1 B
     private boolean lastPresetBtn = false;
@@ -221,7 +282,7 @@ public class AutoShootDodgeRange extends OpMode {
 // the first tick from wrongly jumping to ARRIVED.
     private boolean alignStarted = false;
     // The pose the current align is driving to / holding. Captured when R2 is
-// pressed so pressing L2 mid-align can't make the path and hold disagree.
+// pressed so pressing B mid-align can't make the path and hold disagree.
     private Pose alignTarget = RED_SHOOT_POSES[0];
 
     // ── Structure dodging ────────────────────────────────────────────────────
@@ -274,12 +335,12 @@ public class AutoShootDodgeRange extends OpMode {
     private boolean shooterOn = false;
     private boolean shooterHigh = false;
 
-    // Boost ramps from 0 -> BOOST_MAX over BOOST_RAMP_SECS (0.2s), and back
+    // Boost ramps from 0 -> BOOST_MAX over BOOST_RAMP_SECS, and back
 // down over the same time once R2 is released.
     private double shooterBoost = 0;
     private static final double BOOST_MAX = 0;
     private static final double BOOST_RAMP_SECS = 0;
-    private static final double BOOST_RATE = BOOST_MAX / BOOST_RAMP_SECS; // 2750 ticks/sec²
+    private static final double BOOST_RATE = BOOST_MAX / BOOST_RAMP_SECS;
     private final ElapsedTime boostTimer = new ElapsedTime();
 
     // Game-long ramp: the shooter target creeps up linearly from the HIGH/LOW
@@ -399,11 +460,18 @@ public class AutoShootDodgeRange extends OpMode {
         return angleDiff(now.heading(), headingToGoal(now.x(), now.y()));
     }
 
+    /** CHANGED: also arms the Limelight relocalization for this arrival (llDone=false, timers restarted). */
     private void enterArrived() {
         alignState = AlignState.ARRIVED;
         aimLocked = false;
         arrivedTimer.reset();
         reaimTimer.reset();
+        // NEW: one fresh Limelight reset attempt per arrival
+        llDone = false;
+        llApplied = false;
+        llStatus = "waiting to settle";
+        llTagsSeen = 0;
+        llTimer.reset();
     }
 
     private static double angleDiff(double a, double b) {
@@ -413,6 +481,129 @@ public class AutoShootDodgeRange extends OpMode {
     /** Reset pose (X button) for the chosen alliance + preset. */
     private Pose originPose() {
         return (alliance == Alliance.RED ? RED_RESET_POSES : BLUE_RESET_POSES)[presetIndex];
+    }
+
+// ═════════════════════════════════════════════════════════════════════════
+// Limelight relocalization (NEW)
+// ═════════════════════════════════════════════════════════════════════════
+
+    /** The 4 tag IDs allowed for the current alliance + preset. */
+    private int[] allowedTagIds() {
+        if (alliance == Alliance.RED) return presetIndex == 0 ? RED_0_TAGS : RED_1_TAGS;
+        return presetIndex == 0 ? BLUE_0_TAGS : BLUE_1_TAGS;
+    }
+
+    private static boolean contains(int[] ids, int id) {
+        for (int v : ids) if (v == id) return true;
+        return false;
+    }
+
+    /** "34,35,36,37" style string for telemetry. */
+    private String allowedTagText() {
+        int[] ids = allowedTagIds();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < ids.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(ids[i]);
+        }
+        return sb.toString();
+    }
+
+    /** Field position of a tag from LimelightReset's table (all 16 tags), or null if unknown. */
+    private static double[] tagRow(int id) {
+        for (double[] row : LimelightReset.TAGS) {
+            if ((int) row[0] == id && id >= 0) return row;
+        }
+        return null;
+    }
+
+    /**
+     * Same math as LimelightReset.estimate(), but ONLY tags whose ID is in 'allowed' count.
+     * Every allowed tag in view gives its own robot-center estimate; they are averaged.
+     * Heading is NOT solved - pass Pedro's heading (radians) and keep it when resetting.
+     *
+     * @return { x, y, numberOfAllowedTagsUsed } or null if none of the allowed tags were usable
+     */
+    private double[] estimateFromTags(LLResult result, double headingRad, int[] allowed) {
+        if (result == null || !result.isValid()) return null;
+        List<LLResultTypes.FiducialResult> seen = result.getFiducialResults();
+        if (seen == null || seen.isEmpty()) return null;
+
+        double cos = Math.cos(headingRad), sin = Math.sin(headingRad);
+        double sumX = 0, sumY = 0;
+        int used = 0;
+
+        for (LLResultTypes.FiducialResult fr : seen) {
+            int id = fr.getFiducialId();
+            if (!contains(allowed, id)) continue;          // <-- the filter: other alliance / other preset tags ignored
+            double[] tag = tagRow(id);
+            if (tag == null) continue;
+
+            double[] t = LimelightReset.tagRobotSpaceInches(fr); // { forward, right, up } from robot CENTER
+            if (t == null) continue;
+            double f = t[0];   // forward
+            double r = t[1];   // right
+
+            // Field: forward = (cos, sin), right = (sin, -cos). tagField = center + f*fwd + r*right.
+            sumX += tag[1] - f * cos - r * sin;
+            sumY += tag[2] - f * sin + r * cos;
+            used++;
+        }
+        if (used == 0) return null;
+        return new double[]{ sumX / used, sumY / used, used };
+    }
+
+    /**
+     * Called every loop while ARRIVED. Does the one-time reset, then lets shooting proceed.
+     * Returns true while the robot must NOT shoot yet (still resetting / settling).
+     */
+    private boolean relocalizeStep() {
+        // Already finished this arrival: only the post-reset settle can still be pending.
+        if (llDone) {
+            return llApplied && resetSettleTimer.milliseconds() < RESET_SETTLE_MS;
+        }
+
+        long elapsed = (long) llTimer.milliseconds();
+        if (elapsed < LL_SETTLE_MS) {
+            llStatus = "waiting to settle";
+            return true;
+        }
+
+        Pose now = follower.pose();
+        LLResult result = limelight.getLatestResult();
+        double[] est = null;
+        if (result != null && result.isValid() && result.getStaleness() <= LL_MAX_STALE_MS) {
+            est = estimateFromTags(result, now.heading(), allowedTagIds());
+        }
+
+        if (est != null) {
+            llTagsSeen = (int) est[2];
+            double jump = Math.hypot(est[0] - now.x(), est[1] - now.y());
+            if (jump <= MAX_JUMP_IN) {
+                // Keep Pedro's heading (tags only fix x/y here); then the hold + re-aim loop re-converge.
+                follower.setPose(p.of(est[0], est[1], Math.toDegrees(now.heading())));
+                llApplied = true;
+                llDone = true;
+                resetSettleTimer.reset();
+                arrivedTimer.reset(); // aim "late" window starts now, not at arrival
+                llStatus = String.format("RESET using %d tag(s), moved %.1f in", llTagsSeen, jump);
+                return true; // settle before shooting
+            }
+            llStatus = String.format("rejected: jump %.1f in > %.0f", jump, MAX_JUMP_IN);
+        } else {
+            llTagsSeen = 0;
+            llStatus = "no allowed tag in view";
+        }
+
+        // Nothing usable yet: keep trying until the timeout, then give up so shooting is never blocked.
+        if (elapsed >= LL_TIMEOUT_MS) {
+            llDone = true;
+            llApplied = false;
+            arrivedTimer.reset();
+            llStatus += " - gave up, shooting without reset";
+            return false;
+        }
+        return true;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -433,6 +624,11 @@ public class AutoShootDodgeRange extends OpMode {
         alignWasHeld = false;
         resetWasHeld = false;
         alignStarted = false;
+        llDone = false;
+        llApplied = false;
+
+// NEW: Limelight on the AprilTag pipeline (pipeline 5), started.
+        limelight = LimelightReset.init(hardwareMap);
 
         prism = hardwareMap.get(GoBildaPrismDriver.class, "prism");
         prism.loadAnimationsFromArtboard(GoBildaPrismDriver.Artboard.ARTBOARD_0);
@@ -500,6 +696,7 @@ public class AutoShootDodgeRange extends OpMode {
                 o.x(), o.y(), Math.toDegrees(o.heading()));
         telemetry.addData("Shoot pose", "x=%.1f y=%.1f heading=%.0f deg",
                 s.x(), s.y(), Math.toDegrees(s.heading()));
+        telemetry.addData("Limelight reset tags", allowedTagText()); // NEW
         telemetry.update();
     }
 
@@ -527,8 +724,8 @@ public class AutoShootDodgeRange extends OpMode {
         loopMs = loopTimer.milliseconds();
         loopTimer.reset();
 
-// ── Preset toggle (gamepad 1 L2) ─────────────────────────────────────
-// Switches BOTH the shooting pose and the reset pose for this alliance.
+// ── Preset toggle (gamepad 1 B) ──────────────────────────────────────
+// Switches the shooting pose, the reset pose AND the Limelight tag set for this alliance.
         boolean presetBtn = gamepad1.b;
         if (presetBtn && !lastPresetBtn) presetIndex = 1 - presetIndex;
         lastPresetBtn = presetBtn;
@@ -573,7 +770,9 @@ public class AutoShootDodgeRange extends OpMode {
 
 // Shoot when gamepad 2 R2 is held, OR automatically once the robot has
 // arrived at the shooting pose with gamepad 1 R2 still held (ARRIVED only
-// lasts while gamepad 1 R2 is down). Everything below (kicker delay,
+// lasts while gamepad 1 R2 is down). aimLocked is only allowed to go true AFTER
+// the Limelight reset is finished (see updateAlign ARRIVED), so auto-shoot always
+// fires from the corrected pose. Everything below (kicker delay,
 // intake feed) keys off this one flag, so auto-shoot behaves
 // exactly like a gamepad 2 R2 press.
         boolean shooting = gamepad2.right_trigger > TRIGGER_THRESHOLD
@@ -607,7 +806,7 @@ public class AutoShootDodgeRange extends OpMode {
             shooterMode = "LOW";
         }
 
-// Boost: 0 -> BOOST_MAX in 0.2s while R2 held, back to 0 in 0.2s on release.
+// Boost: 0 -> BOOST_MAX while R2 held, back to 0 on release.
         double boostDt = boostTimer.seconds();
         boostTimer.reset();
         double boostTarget = shooting ? BOOST_MAX : 0;
@@ -700,7 +899,9 @@ public class AutoShootDodgeRange extends OpMode {
                 alignTarget.x(), alignTarget.y(), Math.toDegrees(alignTarget.heading()));
         telemetry.addData("Route", alignState == AlignState.MANUAL ? "-" :
                 (routeCorners > 0 ? "curving around structures (" + routeCorners + " guide pts)" : "straight"));
-
+        // NEW: Limelight reset status
+        telemetry.addData("LL tags allowed", allowedTagText());
+        telemetry.addData("LL reset", alignState == AlignState.ARRIVED ? llStatus : "- (only at shooting spot)");
 
         telemetry.update();
     }
@@ -718,6 +919,7 @@ public class AutoShootDodgeRange extends OpMode {
         setLinkagePosition(LINKAGE_DOWN);
         blocker.setPosition(BLOCKER_CLOSED);
         kicker.setPosition(KICKER_BASE);
+        if (limelight != null) limelight.stop(); // NEW
     }
 
     private void setLinkagePosition(double position) {
@@ -735,7 +937,8 @@ public class AutoShootDodgeRange extends OpMode {
      * drivetrain at a time:
      * MANUAL — driver (plain stick drive, no position hold)
      * ALIGNING — Ivy is driving the path
-     * ARRIVED — path done; Pedro holds the target while R2 stays held.
+     * ARRIVED — path done; Limelight resets pose ONCE, then Pedro holds the target
+     *           while R2 stays held and aim-lock gates the shooting.
      * Release R2 to get driver control back.
      */
     private void updateAlign() {
@@ -798,6 +1001,14 @@ public class AutoShootDodgeRange extends OpMode {
                     aimLocked = false;
                     break;
                 }
+
+// NEW: Limelight relocalization comes FIRST. Until it is finished (reset done + settled,
+// or timed out with no tag) aim-lock stays false, so auto-shoot cannot fire yet.
+                if (relocalizeStep()) {
+                    aimLocked = false;
+                    break;
+                }
+
 // Re-aim from where the robot actually is. If it stopped a little off the
 // spot (or got pushed), the heading to the goal is different from the one
 // worked out for the spot, so update the held heading.
