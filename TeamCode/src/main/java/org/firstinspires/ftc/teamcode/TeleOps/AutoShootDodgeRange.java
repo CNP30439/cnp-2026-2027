@@ -6,20 +6,24 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // intake, servos and sensor are plain hardware.
 //
 // CHANGE SUMMARY (this revision):
-//   * RELOCALIZATION NOW USES MEGATAG 1 (MT1) INSTEAD OF MEGATAG 2.
-//     - Pose comes from result.getBotpose() (MT1) instead of getBotpose_MT2().
-//     - MT1 solves its own heading from the tags, so updateRobotOrientation() is GONE
-//       (it was only needed by MT2).
-//     - The MT2 offset-finder corrections (MT2_CORR_X / MT2_CORR_Y) are REMOVED: they were
-//       measured for MT2's pose and do not apply to MT1. If MT1 shows a steady offset vs
-//       odometry, re-run the offset finder with MT1 and add new corrections.
-//     - NEW LL_MIN_TAGS constant: how many allowed tags must be in view to accept a frame.
-//       Default 1 (same as before). MT1 with a single tag can flip to a mirrored pose, so
-//       set it to 2 if you see occasional bad resets.
-//     - Reset still only takes x/y from the camera; heading stays odometry's.
+//   * LIMELIGHT RESET NOW AVERAGES SEVERAL GOOD FRAMES INSTEAD OF TRUSTING ONE.
+//     After arriving at the shooting spot, Pedro HOLDS the pose (robot is still) and the code
+//     collects LL_SAMPLES camera frames. A frame only counts if:
+//        - it is a new camera frame (timestamp changed, so one frame is never counted twice)
+//        - it is on the correct pipeline, fresh, and sees >= LL_MIN_TAGS allowed tags (MT1)
+//        - its x/y is within LL_FRAME_TOL_IN of where odometry thinks the robot is
+//     Frames that fail are simply ignored (outliers). Once LL_SAMPLES good frames are in, their
+//     x and y are averaged and that average becomes the new pose x/y. Heading stays odometry's
+//     (Pinpoint heading is trusted). Pedro keeps holding the whole time, so after setPose the
+//     robot steps the small correction back onto the target, then auto-shoot is allowed.
+//     Not enough good frames by LL_TIMEOUT_MS -> skip the reset and shoot anyway.
+//   * MAX_JUMP_IN removed: the per-frame LL_FRAME_TOL_IN check replaces it.
+//   * LL_MIN_TAGS is now 3 (the shooting spot always sees 3-4 tags).
+//   * LL_SETTLE_MS raised to 400 and LL_TIMEOUT_MS to 1200 so the robot is still and there is
+//     time to collect the frames.
+//   + RELOCALIZATION USES MEGATAG 1 (MT1): pose from result.getBotpose(). MT1 solves its own
+//     heading, so no updateRobotOrientation() is needed.
 //   + botpose -> Pedro: x/y + 72 (map origin is field center), same toPedro() as before.
-//   + setPose(MT1 x, MT1 y, ODOMETRY heading). After that the odo pods keep
-//     tracking from that pose - the camera is only used for the one reset.
 //   + TAG FILTER LIVES IN THE LIMELIGHT: one pipeline per alliance + preset, each with its tag
 //     ID filter set in the Limelight web UI, so MT1 only ever uses that set's 4 tags:
 //         RED  preset 0 -> pipeline 5 -> tags 34,35,36,37
@@ -27,24 +31,11 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 //         BLUE preset 0 -> pipeline 3 -> tags 38,39,40,41
 //         BLUE preset 1 -> pipeline 2 -> tags 42,43,44,45
 //     The TeleOp picks the pipeline from alliance (INIT dpad) + preset (gamepad 1 B) and
-//     enforcePipeline() keeps re-sending the switch until the camera reports it. A frame is only
-//     used when the camera reports the CORRECT pipeline for the current alliance + preset.
-//     The allowed-tag check in code stays as a sanity check (>= LL_MIN_TAGS tag(s) from the set in view).
+//     enforcePipeline() keeps re-sending the switch until the camera reports it.
 //     NOTE: the pipelines must be AprilTag pipelines with the field map loaded so MT1 botpose works.
-//   + MANUAL RESET KEPT: gamepad 1 X still snaps odometry to the alliance/preset reset pose
-//     (robot on the reset spot). Works any time the driver has control.
-//   + TELEMETRY SHOWS BOTH POSES, ALWAYS (INIT and loop, not only at the shooting spot):
-//        ODOMETRY  = where the odo pods think the robot is
-//        LIMELIGHT = where the camera thinks it is (MT1, current pipeline), or WHY there is none
-//        DIFF      = camera minus odometry (x, y, distance) so you can see how far apart they are
-//     The camera is only READ for display; only the arrival reset (below) writes to the pose.
-//   + AUTO_LL_RESET switch (top constants): true = reset at the shooting spot (default),
-//     false = never touch the pose from the camera, display only. Use false to compare freely.
-//   + Reset still happens ONCE per arrival at the shooting spot, BEFORE shooting:
-//     wait LL_SETTLE_MS -> read MT1 -> setPose -> wait RESET_SETTLE_MS -> aim lock may go
-//     true -> auto-shoot. No allowed tag within LL_TIMEOUT_MS = skip reset and shoot anyway.
-//     Gamepad 2 R2 manual shooting is untouched.
-//   + MAX_JUMP_IN (30 in) rejects a camera fix too far from odometry. 999 = off.
+//   + MANUAL RESET KEPT: gamepad 1 X still snaps odometry to the alliance/preset reset pose.
+//   + TELEMETRY SHOWS BOTH POSES, ALWAYS (ODOMETRY / LIMELIGHT / DIFF).
+//   + AUTO_LL_RESET switch: true = reset at the shooting spot, false = display only.
 //   + Everything else (drive, shooter, intake, kicker, dodging, aim lock) is unchanged.
 //
 // HARDWARE (names must match the Robot Configuration on the Driver Hub)
@@ -79,8 +70,8 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 // while it moves). Release R2 to cancel / take back control.
 // X — reset pose to the current reset pose (robot on the
 // reset spot, facing the same way). Ignored while aligning.
-// After R2 arrives — Limelight relocalizes ONCE (allowed tags only), then Pedro
-// holds the target position while R2 is held.
+// After R2 arrives — Pedro HOLDS the target for as long as R2 is held. While holding, the
+// Limelight relocalizes ONCE (average of good frames), then auto-shoot is allowed.
 // Release R2 and you drive normally (no position hold).
 // AUTO-SHOOT: once it arrives AND the Limelight reset is done AND aim is locked,
 // the robot starts the same shoot sequence as gamepad 2 R2 (below) for as long
@@ -220,17 +211,20 @@ public class AutoShootDodgeRange extends OpMode {
     private static final int[] BLUE_1_TAGS = {42, 43, 44, 45};
 
     // ── Limelight relocalization tuning ──────────────────────────────────────
-    private static final long   LL_SETTLE_MS    = 200;  // after ARRIVED, wait this long before reading the camera (robot stopped)
-    private static final long   LL_TIMEOUT_MS   = 700;  // measured from ARRIVED; no allowed tag by then -> skip reset, shoot anyway
+    private static final long   LL_SETTLE_MS    = 400;  // after ARRIVED, wait this long (robot stopped and holding) before reading the camera
+    private static final long   LL_TIMEOUT_MS   = 1200; // measured from ARRIVED; not enough good frames by then -> skip reset, shoot anyway
     private static final long   LL_MAX_STALE_MS = 100;  // ignore camera frames older than this
     private static final long   RESET_SETTLE_MS = 250;  // after setPose, let the hold re-converge before aimLocked can go true
     private static final boolean AUTO_LL_RESET  = true; // false = camera is display-only, pose is never changed by it
-    private static final double MAX_JUMP_IN     = 30.0; // reject a camera fix this far from odometry (bad frame). 999 = off
-    // MT1 only: how many allowed tags must be in view to accept a frame. MT1 with ONE tag can flip to a
-    // mirrored pose, so set this to 2 if you see occasional bad resets.
-    private static final int    LL_MIN_TAGS     = 1;
+    // How many allowed tags must be in view for a frame to count. The shooting spot always sees 3-4.
+    private static final int    LL_MIN_TAGS     = 3;
+    // How many GOOD frames to collect and average before resetting the pose.
+    private static final int    LL_SAMPLES      = 8;
+    // A frame whose x/y is farther than this from odometry is an outlier and is ignored.
+    // We reset every shot, so odometry never drifts far; anything bigger than this is a bad frame.
+    private static final double LL_FRAME_TOL_IN = 5.0;
 
-    // Camera setup (MegaTag 1 - no robot orientation needed, no MT2 offset corrections)
+    // Camera setup (MegaTag 1 - no robot orientation needed)
     private static final String LIMELIGHT_NAME = "orange"; // change if the Robot Configuration names it differently
     // One Limelight pipeline per alliance + preset; each pipeline's tag ID filter is set in the Limelight web UI
     private static final int    RED_0_PIPELINE  = 5; // tags 34,35,36,37
@@ -295,6 +289,15 @@ public class AutoShootDodgeRange extends OpMode {
     private String llStatus = "-";
     private int llTagsSeen = 0;                   // allowed tags in view on the last attempt
     private long lastSwitchMs = 0;                // for enforcePipeline() throttling
+    // Frame collection for this arrival (cleared in enterArrived()).
+    private double llSumX = 0, llSumY = 0;        // running sum of the good frames' x / y
+    private int    llGoodFrames = 0;              // good frames collected so far (target: LL_SAMPLES)
+    private final double[] llXs = new double[LL_SAMPLES]; // telemetry only: each accepted reading
+    private final double[] llYs = new double[LL_SAMPLES];
+    private int    llRejected = 0;                        // telemetry only: outliers dropped
+    private boolean llHasResult = false;                  // telemetry only: average applied
+    private double llAvgX, llAvgY, llOdoX, llOdoY;        // telemetry only: average + odometry before reset
+    private double llLastFrameTs = -1;            // timestamp of the last frame looked at, so each frame counts once
 
     private Alliance alliance = Alliance.RED;
     private int presetIndex = 0; // 0 or 1, toggled by gamepad 1 B
@@ -483,7 +486,7 @@ public class AutoShootDodgeRange extends OpMode {
         return angleDiff(now.heading(), headingToGoal(now.x(), now.y()));
     }
 
-    /** Also arms the Limelight relocalization for this arrival (llDone=false, timers restarted). */
+    /** Also arms the Limelight relocalization for this arrival (llDone=false, frame collection cleared, timers restarted). */
     private void enterArrived() {
         alignState = AlignState.ARRIVED;
         aimLocked = false;
@@ -494,6 +497,12 @@ public class AutoShootDodgeRange extends OpMode {
         llApplied = false;
         llStatus = "waiting to settle";
         llTagsSeen = 0;
+        llSumX = 0;
+        llSumY = 0;
+        llGoodFrames = 0;
+        llRejected = 0;
+        llHasResult = false;
+        llLastFrameTs = -1;
         llTimer.reset();
     }
 
@@ -627,6 +636,27 @@ public class AutoShootDodgeRange extends OpMode {
         }
     }
 
+    /** Telemetry section: every accepted Limelight reading, their average, and the average vs odometry. */
+    private void addResetTelemetry() {
+        telemetry.addLine("--- LL RESET READINGS ---");
+        if (llGoodFrames == 0) {
+            telemetry.addData("  readings", "none yet");
+            return;
+        }
+        for (int i = 0; i < llGoodFrames; i++) {
+            telemetry.addData("  reading " + (i + 1), "x=%.2f y=%.2f", llXs[i], llYs[i]);
+        }
+        telemetry.addData("  outliers rejected", "%d", llRejected);
+        if (!llHasResult) {
+            telemetry.addData("  average", "collecting %d/%d", llGoodFrames, LL_SAMPLES);
+            return;
+        }
+        telemetry.addData("  AVERAGE", "x=%.2f y=%.2f", llAvgX, llAvgY);
+        telemetry.addData("  ODOMETRY at reset", "x=%.2f y=%.2f", llOdoX, llOdoY);
+        telemetry.addData("  AVG minus ODO", "dx=%.2f dy=%.2f dist=%.2f in",
+                llAvgX - llOdoX, llAvgY - llOdoY, Math.hypot(llAvgX - llOdoX, llAvgY - llOdoY));
+    }
+
     /** Allowed-tag count of the latest camera frame (display only). */
     private int llLiveTags() {
         LLResult r = limelight.getLatestResult();
@@ -639,8 +669,9 @@ public class AutoShootDodgeRange extends OpMode {
     }
 
     /**
-     * Called every loop while ARRIVED. Does the one-time reset, then lets shooting proceed.
-     * Returns true while the robot must NOT shoot yet (still resetting / settling).
+     * Called every loop while ARRIVED (Pedro is already holding the target, so the robot is still).
+     * Collects LL_SAMPLES good camera frames, averages their x/y, and sets that as the pose ONCE.
+     * Returns true while the robot must NOT shoot yet (still collecting / settling after the reset).
      */
     private boolean relocalizeStep() {
         if (!AUTO_LL_RESET) { // display-only mode: never write the camera pose, never delay shooting
@@ -659,25 +690,47 @@ public class AutoShootDodgeRange extends OpMode {
         }
 
         Pose now = follower.pose();
-        double[] est = readAllowedMt1(limelight.getLatestResult());
+        LLResult result = limelight.getLatestResult();
+        double[] frame = readAllowedMt1(result); // null = unusable frame (reason is in llStatus)
 
-        if (est != null) {
-            double jump = Math.hypot(est[0] - now.x(), est[1] - now.y());
-            if (jump <= MAX_JUMP_IN) {
-                // Camera gives x/y; heading stays odometry's.
-                // From here the odo pods keep tracking from this corrected pose.
-                follower.setPose(p.of(est[0], est[1], Math.toDegrees(now.heading())));
-                llApplied = true;
-                llDone = true;
-                resetSettleTimer.reset();
-                arrivedTimer.reset(); // aim "late" window starts now, not at arrival
-                llStatus = String.format("RESET from MT1 (%d allowed tag(s)), moved %.1f in", llTagsSeen, jump);
-                return true; // settle before shooting
+        // Each camera frame counts once, and only if it agrees with odometry to within LL_FRAME_TOL_IN.
+        if (frame != null && result.getTimestamp() != llLastFrameTs) {
+            llLastFrameTs = result.getTimestamp();
+            double off = Math.hypot(frame[0] - now.x(), frame[1] - now.y());
+            if (off <= LL_FRAME_TOL_IN) {
+                llXs[llGoodFrames] = frame[0];
+                llYs[llGoodFrames] = frame[1];
+                llSumX += frame[0];
+                llSumY += frame[1];
+                llGoodFrames++;
+                llStatus = String.format("good frames %d/%d", llGoodFrames, LL_SAMPLES);
+            } else {
+                llRejected++;
+                llStatus = String.format("frame ignored: %.1f in from odometry (good %d/%d)", off, llGoodFrames, LL_SAMPLES);
             }
-            llStatus = String.format("rejected: jump %.1f in > %.0f", jump, MAX_JUMP_IN);
         }
 
-        // Nothing usable yet: keep trying until the timeout, then give up so shooting is never blocked.
+        if (llGoodFrames >= LL_SAMPLES) {
+            // Average the good frames. Camera gives x/y; heading stays odometry's (Pinpoint).
+            // Pedro is still holding alignTarget, so after setPose it steps the small correction back onto the target.
+            double x = llSumX / llGoodFrames;
+            double y = llSumY / llGoodFrames;
+            llAvgX = x;
+            llAvgY = y;
+            llOdoX = now.x(); // odometry BEFORE setPose, so the comparison is meaningful
+            llOdoY = now.y();
+            llHasResult = true;
+            double moved = Math.hypot(x - now.x(), y - now.y());
+            follower.setPose(p.of(x, y, Math.toDegrees(now.heading())));
+            llApplied = true;
+            llDone = true;
+            resetSettleTimer.reset();
+            arrivedTimer.reset(); // aim "late" window starts now, not at arrival
+            llStatus = String.format("RESET from avg of %d frames, moved %.1f in", llGoodFrames, moved);
+            return true; // settle before shooting
+        }
+
+        // Not enough good frames yet: keep trying until the timeout, then give up so shooting is never blocked.
         if (elapsed >= LL_TIMEOUT_MS) {
             llDone = true;
             llApplied = false;
@@ -736,8 +789,8 @@ public class AutoShootDodgeRange extends OpMode {
         leftIntake = hardwareMap.get(DcMotorEx.class, "li");
         rightIntake = hardwareMap.get(DcMotorEx.class, "ri");
 // Flipped: positive power now pulls balls IN (shoot-feed, A) and negative pushes OUT (B).
-        leftIntake.setDirection(DcMotorSimple.Direction.REVERSE);
-        rightIntake.setDirection(DcMotorSimple.Direction.FORWARD);
+        leftIntake.setDirection(DcMotorSimple.Direction.FORWARD);
+        rightIntake.setDirection(DcMotorSimple.Direction.REVERSE);
         leftIntake.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         rightIntake.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         leftIntake.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
@@ -993,6 +1046,7 @@ public class AutoShootDodgeRange extends OpMode {
         // Limelight reset status
         telemetry.addData("LL tags / pipeline", "%s / %d", allowedTagText(), desiredPipeline());
         telemetry.addData("LL reset", alignState == AlignState.ARRIVED ? llStatus : "- (only at shooting spot)");
+        addResetTelemetry();
 
         telemetry.update();
     }
@@ -1028,8 +1082,9 @@ public class AutoShootDodgeRange extends OpMode {
      * drivetrain at a time:
      * MANUAL — driver (plain stick drive, no position hold)
      * ALIGNING — Ivy is driving the path
-     * ARRIVED — path done; Limelight resets pose ONCE, then Pedro holds the target
-     *           while R2 stays held and aim-lock gates the shooting.
+     * ARRIVED — path done; Pedro HOLDS the target while R2 stays held. The Limelight
+     *           averages good frames and resets the pose ONCE during the hold, then
+     *           aim-lock gates the shooting.
      * Release R2 to get driver control back.
      */
     private void updateAlign() {
@@ -1093,8 +1148,8 @@ public class AutoShootDodgeRange extends OpMode {
                     break;
                 }
 
-// Limelight relocalization comes FIRST. Until it is finished (reset done + settled,
-// or timed out with no tag) aim-lock stays false, so auto-shoot cannot fire yet.
+// Limelight relocalization comes FIRST (robot is held still meanwhile). Until it is finished
+// (reset done + settled, or timed out) aim-lock stays false, so auto-shoot cannot fire yet.
                 if (relocalizeStep()) {
                     aimLocked = false;
                     break;
