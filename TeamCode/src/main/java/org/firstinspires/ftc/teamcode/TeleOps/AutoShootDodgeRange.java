@@ -165,8 +165,8 @@ import static com.pedropathing.ivy.Scheduler.schedule;
 import static com.pedropathing.ivy.pedro.PedroCommands.follow;
 import static com.pedropathing.ivy.pedro.PedroCommands.hold;
 
-@TeleOp(name = "TeleMain😎", group = "TeleOp")
-@Disabled
+@TeleOp(name = "die", group = "TeleOp")
+//@Disabled
 public class AutoShootDodgeRange extends OpMode {
 
     // ── Drive ────────────────────────────────────────────────────────────────

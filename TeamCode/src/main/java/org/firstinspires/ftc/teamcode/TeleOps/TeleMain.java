@@ -115,7 +115,7 @@ import static com.pedropathing.api.Paths.line;
 import static com.pedropathing.ivy.Scheduler.schedule;
 import static com.pedropathing.ivy.pedro.PedroCommands.follow;
 import static com.pedropathing.ivy.pedro.PedroCommands.hold;
-@Disabled
+//@Disabled
 @TeleOp(name = "OldTele", group = "TeleOp")
 public class TeleMain extends OpMode {
 

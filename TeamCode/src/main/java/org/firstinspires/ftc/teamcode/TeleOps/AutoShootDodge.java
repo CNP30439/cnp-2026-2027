@@ -140,7 +140,7 @@ import static com.pedropathing.ivy.pedro.PedroCommands.follow;
 import static com.pedropathing.ivy.pedro.PedroCommands.hold;
 
 @TeleOp(name = "Autoshotdodge😁", group = "TeleOp")
-@Disabled
+//@Disabled
 public class AutoShootDodge extends OpMode {
 
     // ── Drive ────────────────────────────────────────────────────────────────
