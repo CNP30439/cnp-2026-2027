@@ -129,6 +129,7 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.LLResultTypes;
 import com.qualcomm.hardware.limelightvision.Limelight3A;
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotor;
@@ -165,6 +166,7 @@ import static com.pedropathing.ivy.pedro.PedroCommands.follow;
 import static com.pedropathing.ivy.pedro.PedroCommands.hold;
 
 @TeleOp(name = "TeleMain😎", group = "TeleOp")
+@Disabled
 public class AutoShootDodgeRange extends OpMode {
 
     // ── Drive ────────────────────────────────────────────────────────────────

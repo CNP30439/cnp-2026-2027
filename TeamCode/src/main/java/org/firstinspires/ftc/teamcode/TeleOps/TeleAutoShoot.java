@@ -126,6 +126,7 @@ import static com.pedropathing.ivy.pedro.PedroCommands.follow;
 import static com.pedropathing.ivy.pedro.PedroCommands.hold;
 @Disabled
 @TeleOp(name = "TeleAutoShoot", group = "TeleOp")
+
 public class TeleAutoShoot extends OpMode {
 
     // ── Drive ────────────────────────────────────────────────────────────────

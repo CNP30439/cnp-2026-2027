@@ -36,7 +36,11 @@ import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
+import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
+import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.util.ElapsedTime;
+
+import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
 import org.firstinspires.ftc.teamcode.pedro.Constants;
 
@@ -134,6 +138,20 @@ public class TurretTeleOp extends OpMode {
     private double dbgTargetRad, dbgErrRad, dbgPower;
     private double seenMinDeg = 0, seenMaxDeg = 0; // INIT limit finder
 
+    // ── DIAGNOSTICS: find out why the aim is lost after many spins ───────────
+    // Control Hub orientation on the robot (only matters for the IMU diagnostic line). Spin the robot
+    // counter-clockwise: the IMU number must go UP. If it does not move, fix these two. If it goes down, tell me.
+    private static final RevHubOrientationOnRobot.LogoFacingDirection HUB_LOGO =
+            RevHubOrientationOnRobot.LogoFacingDirection.UP;
+    private static final RevHubOrientationOnRobot.UsbFacingDirection HUB_USB =
+            RevHubOrientationOnRobot.UsbFacingDirection.FORWARD;
+    private static final double JOG_POWER = 0.2; // hold gamepad1 Y / A to jog the turret slowly (stop probe)
+    private IMU imu;
+    private double pedroTurns, imuTurns; // total heading change since start / X press (rad, not wrapped)
+    private double lastPedroH, lastImuH;
+    private int unwinds;
+    private double peakTicksPerSec;
+
     // ── Helpers ──────────────────────────────────────────────────────────────
     private Pose resetPose() {
         return (alliance == Alliance.RED ? RED_RESET_POSES : BLUE_RESET_POSES)[presetIndex];
@@ -182,7 +200,7 @@ public class TurretTeleOp extends OpMode {
         double w = wrap(angle);
         double twoPi = 2 * Math.PI;
         double cont = w + Math.round((prevTarget - w) / twoPi) * twoPi; // continuous with last loop
-        if (cont >= TURRET_MIN_RAD && cont <= TURRET_MAX_RAD) return cont;z
+        if (cont >= TURRET_MIN_RAD && cont <= TURRET_MAX_RAD) return cont;
 
         double best = Double.NaN;
         for (int k = -1; k <= 1; k++) {
@@ -205,6 +223,13 @@ public class TurretTeleOp extends OpMode {
         turret.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         turret.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
         turret.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+
+        try {
+            imu = hardwareMap.get(IMU.class, "imu");
+            imu.initialize(new IMU.Parameters(new RevHubOrientationOnRobot(HUB_LOGO, HUB_USB)));
+        } catch (Exception e) {
+            imu = null; // diagnostic only: the OpMode still runs without it
+        }
 
         telemetry.addLine("Gamepad 1: dpad UP = RED, dpad DOWN = BLUE");
         telemetry.addLine("Turret must be at its zero position NOW (encoder is zeroed in INIT)");
@@ -234,7 +259,19 @@ public class TurretTeleOp extends OpMode {
         follower.setPose(resetPose());
         lastWanted = wantedTurretAngle(follower.pose());
         lastTarget = turretAngleRad();
+        resetDiag();
         dtTimer.reset();
+    }
+
+    private double imuYaw() {
+        return imu == null ? 0 : imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+    }
+
+    private void resetDiag() {
+        lastPedroH = follower.pose().heading();
+        lastImuH = imuYaw();
+        pedroTurns = 0;
+        imuTurns = 0;
     }
 
     @Override
@@ -243,7 +280,7 @@ public class TurretTeleOp extends OpMode {
         boolean b = gamepad1.b, x = gamepad1.x, rb = gamepad1.right_bumper;
         boolean dl = gamepad1.dpad_left, dr = gamepad1.dpad_right;
         if (b && !lastB) presetIndex = 1 - presetIndex;
-        if (x && !lastX) follower.setPose(resetPose());
+        if (x && !lastX) { follower.setPose(resetPose()); resetDiag(); }
         if (rb && !lastRB) aimOn = !aimOn;
         if (dl && !lastDL) aimTrimRad -= AIM_TRIM_STEP_RAD;
         if (dr && !lastDR) aimTrimRad += AIM_TRIM_STEP_RAD;
@@ -258,6 +295,12 @@ public class TurretTeleOp extends OpMode {
 
         // ── Robot spin rate (rad/s), filtered ────────────────────────────
         Pose pose = follower.pose();
+        pedroTurns += wrap(pose.heading() - lastPedroH);
+        lastPedroH = pose.heading();
+        double yaw = imuYaw();
+        imuTurns += wrap(yaw - lastImuH);
+        lastImuH = yaw;
+        peakTicksPerSec = Math.max(peakTicksPerSec, Math.abs(turret.getVelocity()));
         double dt = Math.max(dtTimer.seconds(), 1e-3);
         dtTimer.reset();
         // Rate the wanted angle is changing, from BOTH robot spin and robot translation.
@@ -271,6 +314,7 @@ public class TurretTeleOp extends OpMode {
         // ── Turret ───────────────────────────────────────────────────────
         double current = turretAngleRad();
         double target = aimOn ? fitToRange(wanted + AIM_OFFSET_RAD + aimTrimRad, lastTarget) : 0;
+        if (aimOn && Math.abs(target - lastTarget) > Math.PI) unwinds++; // target jumped to the other side of the range
         lastTarget = aimOn ? target : current; // aim turned back ON starts from where the turret really is
         double err = target - current;
 
@@ -284,6 +328,13 @@ public class TurretTeleOp extends OpMode {
         // Big swings (unwind / flick) are slower so the turret does not overshoot and then come back from the other side.
         double cap = Math.abs(err) > Math.toRadians(SWING_ERR_DEG) ? SWING_POWER : MAX_POWER;
         power = Math.max(-cap, Math.min(cap, power));
+        // Stop probe: hold Y (turret +, counter-clockwise) or A (turret -, clockwise) to creep into a hard stop.
+        // Read "raw ticks" at the stop. Same stop, different ticks later = the encoder count moved.
+        boolean jog = gamepad1.y ^ gamepad1.a;
+        if (jog) {
+            power = gamepad1.y ? JOG_POWER : -JOG_POWER;
+            lastTarget = current; // aim resumes from where the turret is when you let go
+        }
         turret.setPower(POWER_SIGN * power);
 
         dbgTargetRad = target;
@@ -309,6 +360,13 @@ public class TurretTeleOp extends OpMode {
         telemetry.addData("Turret raw ticks", "%d  (%.1f ticks/deg assumed)",
                 turret.getCurrentPosition(), TICKS_PER_RAD * Math.PI / 180.0);
         telemetry.addData("Goal rate / power", "%.0f deg/s  %.2f", Math.toDegrees(spinRate), dbgPower);
+        // Both numbers are total robot turning since start / X press. They must stay equal.
+        telemetry.addData("Robot turned", imu == null ? "Pedro %.0f deg   (IMU not found)"
+                        : "Pedro %.0f deg   IMU %.0f deg   diff %.1f deg",
+                imu == null ? new Object[]{Math.toDegrees(pedroTurns)}
+                        : new Object[]{Math.toDegrees(pedroTurns), Math.toDegrees(imuTurns), Math.toDegrees(pedroTurns - imuTurns)});
+        telemetry.addData("Unwinds / peak encoder speed", "%d   %.0f ticks/s", unwinds, peakTicksPerSec);
+        telemetry.addData("Stop probe", "hold Y = turret + (CCW), hold A = turret - (CW) %s", jog ? "<< JOGGING" : "");
         telemetry.update();
     }
 

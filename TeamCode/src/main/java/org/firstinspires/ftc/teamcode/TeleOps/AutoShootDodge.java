@@ -105,6 +105,7 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 //    Servos, distance sensor, and Prism have no SDK voltage/current reading.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotor;
@@ -139,6 +140,7 @@ import static com.pedropathing.ivy.pedro.PedroCommands.follow;
 import static com.pedropathing.ivy.pedro.PedroCommands.hold;
 
 @TeleOp(name = "Autoshotdodge😁", group = "TeleOp")
+@Disabled
 public class AutoShootDodge extends OpMode {
 
     // ── Drive ────────────────────────────────────────────────────────────────
