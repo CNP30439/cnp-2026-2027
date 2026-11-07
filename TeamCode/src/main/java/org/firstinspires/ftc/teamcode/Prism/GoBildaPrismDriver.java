@@ -44,7 +44,7 @@ import java.util.concurrent.TimeUnit;
         xmlTag = "goBILDAPrism",
         description ="Prism RGB LED Driver (6-30V Input, I²C / PWM Control)"
 )
-
+@Disabled
 public class GoBildaPrismDriver extends I2cDeviceSynchDevice<I2cDeviceSynchSimple> {
     private static final byte DEFAULT_ADDRESS = 0x38;
     private final int MAXIMUM_NUMBER_OF_ANIMATIONS = 10;

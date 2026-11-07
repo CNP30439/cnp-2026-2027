@@ -11,15 +11,16 @@ import com.qualcomm.robotcore.hardware.PIDFCoefficients;
 public class FlywheelTuner extends OpMode {
     public DcMotorEx ls;
     public DcMotorEx rs;
- 
-    public double highVelocity =4300;//Max RPM 6943
-    public double lowVelocity =2600;
+
+    double F = 12.84;   // or your measured value
+    double P = 71.5;
+
+    double highVelocity = 4300 / 1.5 * 28.0 / 60.0;  // ~1338 ticks/s  6814 rpm max
+    double lowVelocity  = 2600 / 1.5 * 28.0 / 60.0;  // ~809 ticks/s
  
     double curTargetVelocity = lowVelocity;
  
-    double F = 14.366;
- 
-    double P = 1.7000;
+
  
     // Full decade progression so you can walk gains down smoothly instead of
     // jumping 100x from 0.1 straight to 0.001 (0.01 was missing before).

@@ -1,17 +1,34 @@
 package org.firstinspires.ftc.teamcode.blobcv;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  LiveColorTuner.java  —  Tune exposure, gain and HSV range LIVE with gamepad 1.
-//                          No redeploying. Replaces ColorSampler + MaskViewer
-//                          for tuning (you can keep them, they still work).
+//  LiveBrightnessTuner.java  —  Tune exposure, gain and a BRIGHTNESS range LIVE
+//                          with gamepad 1. No redeploying.
+//
+//  CAMERA: SWYFT USB Camera (OV9281-class global-shutter MONOCHROME sensor).
+//    This camera has no color channel, so it can't be tuned by hue/saturation
+//    like a normal webcam. Instead this tuner thresholds on raw brightness
+//    (0 = black, 255 = white): a bright yellow ball under the robot's own
+//    lighting/exposure comes back as a clearly brighter blob than the field
+//    around it, so "find pixels brighter than X" does the same job HSV would
+//    on a color camera — it just can't tell bright-yellow apart from any other
+//    bright-colored object. If the field has other bright/reflective stuff in
+//    frame (white lines, glare, bright jerseys) you may need to also narrow
+//    EXPOSURE so only the ball is bright enough to cross the threshold.
+//    Fixed MJPEG modes only: 160x120 / 320x240 / 352x288 / 640x400 @210fps,
+//    640x480 / 800x600 / 1024x768 / 1280x720 / 1280x800 @120fps.
 //
 //  HOW TO USE
 //    1. Run this OpMode and stay in INIT (everything works in INIT).
 //    2. Driver Station → three-dot menu → Camera Stream. Tap the image to
 //       refresh it after each change (the preview doesn't auto-update).
-//    3. Use the controls below. Telemetry shows every value and marks the one
+//    3. Point the camera at a yellow ball so it sits in the green sample box
+//       in the middle of the image.
+//    4. Use the controls below. Telemetry shows every value and marks the one
 //       you're editing with  >> .
-//    4. When the mask is clean, copy the lines under "COPY INTO BlobChaseTest"
+//    5. Press X to auto-set the brightness range from the ball in the box.
+//       Lower EXPOSURE (dpad left to select it, dpad down to lower) until the
+//       field background drops out of range but the ball stays in it.
+//    6. When the mask is clean, copy the lines under "COPY INTO BlobChaseTest"
 //       into BlobChaseTest. Values are NOT saved when the OpMode stops.
 //
 //  CONTROLS (gamepad 1)
@@ -19,13 +36,12 @@ package org.firstinspires.ftc.teamcode.blobcv;
 //    dpad up / down     — raise / lower it
 //    hold right bumper  — change in bigger steps (×10)
 //    A                  — switch view: NORMAL image  ↔  black/white MASK
-//    X                  — auto-sample: set the HSV range from whatever is in
-//                         the green box in the middle of the image (± margins)
-//
-//  OpenCV HSV RANGES: H 0–180, S 0–255, V 0–255
+//    X                  — auto-sample: set the brightness range from whatever
+//                         is in the green box in the middle of the image (± margin)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import android.graphics.Canvas;
+import android.util.Size;
 
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
@@ -46,26 +62,28 @@ import org.opencv.imgproc.Imgproc;
 
 import java.util.concurrent.TimeUnit;
 
-@TeleOp(name = "LiveColorTuner", group = "Vision")
+@TeleOp(name = "LiveBrightnessTuner", group = "Vision")
 public class ColorSampler extends LinearOpMode {
+
+    // ── Camera resolution ────────────────────────────────────────────────────
+    // SWYFT USB Camera only offers fixed MJPEG modes; 1280x720@120fps per spec.
+    private static final int CAMERA_WIDTH  = 1280;
+    private static final int CAMERA_HEIGHT = 720;
 
     // ── Starting values ──────────────────────────────────────────────────────
     private int exposureMs = 5;
     private int gain       = 50;
     private static final int WHITE_BALANCE = 4000;
 
-    // [hLow, hHigh, sLow, sHigh, vLow, vHigh]
-    private final int[] hsv = {15, 35, 80, 255, 80, 255};
+    // [brightnessLow, brightnessHigh], 0-255. Pixels inside this range = "ball".
+    private final int[] brightness = {200, 255};
 
-    // Margins used by the X (auto-sample) button.
-    private static final int H_MARGIN = 10;
-    private static final int S_MARGIN = 40;
-    private static final int V_MARGIN = 40;
+    // Margin used by the X (auto-sample) button.
+    private static final int BRIGHTNESS_MARGIN = 30;
 
     // ── Editable values, in the order dpad left/right cycles through ─────────
     private static final String[] NAMES = {
-            "Exposure (ms)", "Gain",
-            "H low", "H high", "S low", "S high", "V low", "V high"
+            "Exposure (ms)", "Gain", "Brightness low", "Brightness high"
     };
     private int selected = 0;
 
@@ -79,10 +97,15 @@ public class ColorSampler extends LinearOpMode {
     @Override
     public void runOpMode() {
         TunerProcessor processor = new TunerProcessor();
-        processor.setRange(hsv);
+        processor.setRange(brightness);
 
         VisionPortal portal = new VisionPortal.Builder()
                 .setCamera(hardwareMap.get(WebcamName.class, "Webcam 1"))
+                .setCameraResolution(new Size(CAMERA_WIDTH, CAMERA_HEIGHT))
+                // SWYFT USB Camera is MJPEG-only — it has no raw/YUY2 mode, and
+                // VisionPortal defaults to requesting YUY2, which this camera
+                // rejects ("doesn't support format YUY2"). Force MJPEG instead.
+                .setStreamFormat(VisionPortal.StreamFormat.MJPEG)
                 .addProcessor(processor)
                 .build();
 
@@ -121,7 +144,7 @@ public class ColorSampler extends LinearOpMode {
             if (down && !lastDown) change = -step;
             if (change != 0) {
                 changeSelected(change);
-                processor.setRange(hsv);
+                processor.setRange(brightness);
                 message = "";
             }
 
@@ -130,26 +153,19 @@ public class ColorSampler extends LinearOpMode {
 
             // ── X: auto-sample the green box ────────────────────────────────
             if (x && !lastX) {
-                double[] s = processor.getSample();
-                int h = (int) Math.round(s[0]);
-                int sa = (int) Math.round(s[1]);
-                int v = (int) Math.round(s[2]);
-                hsv[0] = clamp(h  - H_MARGIN, 0, 180);
-                hsv[1] = clamp(h  + H_MARGIN, 0, 180);
-                hsv[2] = clamp(sa - S_MARGIN, 0, 255);
-                hsv[3] = clamp(sa + S_MARGIN, 0, 255);
-                hsv[4] = clamp(v  - V_MARGIN, 0, 255);
-                hsv[5] = clamp(v  + V_MARGIN, 0, 255);
-                processor.setRange(hsv);
-                message = String.format("Sampled H %d S %d V %d", h, sa, v);
+                int b = (int) Math.round(processor.getSample());
+                brightness[0] = clamp(b - BRIGHTNESS_MARGIN, 0, 255);
+                brightness[1] = clamp(b + BRIGHTNESS_MARGIN, 0, 255);
+                processor.setRange(brightness);
+                message = String.format("Sampled brightness %d", b);
             }
 
             lastLeft = left; lastRight = right; lastUp = up; lastDown = down;
             lastA = a; lastX = x;
 
             // ── Telemetry ───────────────────────────────────────────────────
-            double[] live = processor.getSample();
-            int[] values = {exposureMs, gain, hsv[0], hsv[1], hsv[2], hsv[3], hsv[4], hsv[5]};
+            double live = processor.getSample();
+            int[] values = {exposureMs, gain, brightness[0], brightness[1]};
 
             telemetry.addData("View", processor.showMask ? "MASK (A to switch)" : "NORMAL (A to switch)");
             telemetry.addData("Step", step == 1 ? "1  (hold RB for 10)" : "10");
@@ -158,13 +174,12 @@ public class ColorSampler extends LinearOpMode {
                 telemetry.addLine((i == selected ? ">> " : "   ") + NAMES[i] + ": " + values[i]);
             }
             telemetry.addLine("---");
-            telemetry.addData("Green box HSV", "H %.0f  S %.0f  V %.0f", live[0], live[1], live[2]);
-            telemetry.addData("White pixels", processor.whitePixels);
+            telemetry.addData("Green box brightness", "%.0f / 255", live);
+            telemetry.addData("White (ball) pixels", processor.whitePixels);
             if (!message.isEmpty()) telemetry.addLine(message);
             telemetry.addLine("--- COPY INTO BlobChaseTest ---");
             telemetry.addLine(String.format("EXPOSURE_MS = %d;  GAIN = %d;", exposureMs, gain));
-            telemetry.addLine(String.format("new Scalar(%d, %d, %d)", hsv[0], hsv[2], hsv[4]));
-            telemetry.addLine(String.format("new Scalar(%d, %d, %d)", hsv[1], hsv[3], hsv[5]));
+            telemetry.addLine(String.format("BRIGHTNESS_LOW = %d;  BRIGHTNESS_HIGH = %d;", brightness[0], brightness[1]));
             telemetry.update();
 
             sleep(20);
@@ -185,14 +200,12 @@ public class ColorSampler extends LinearOpMode {
                 applyGain();
                 break;
             default:
-                int i   = selected - 2;          // index into hsv[]
-                int max = (i < 2) ? 180 : 255;   // hue tops out at 180
-                hsv[i]  = clamp(hsv[i] + change, 0, max);
+                int i = selected - 2;   // index into brightness[]
+                brightness[i] = clamp(brightness[i] + change, 0, 255);
                 // Keep low ≤ high.
-                int pairLow = i - (i % 2);
-                if (hsv[pairLow] > hsv[pairLow + 1]) {
-                    if (i % 2 == 0) hsv[pairLow + 1] = hsv[pairLow];
-                    else            hsv[pairLow]     = hsv[pairLow + 1];
+                if (brightness[0] > brightness[1]) {
+                    if (i == 0) brightness[1] = brightness[0];
+                    else        brightness[0] = brightness[1];
                 }
         }
     }
@@ -243,46 +256,47 @@ public class ColorSampler extends LinearOpMode {
 
     // ═════════════════════════════════════════════════════════════════════════
     //  Processor: shows either the normal image or the mask, and always samples
-    //  the average HSV inside a small green box in the center.
+    //  the average brightness inside a small green box in the center.
+    //  Mono-sensor friendly: works on a single grayscale channel instead of HSV,
+    //  since the SWYFT USB Camera has no color information to threshold on.
     // ═════════════════════════════════════════════════════════════════════════
     static class TunerProcessor implements VisionProcessor {
 
         private static final int BOX_SIZE = 20;
 
-        private final Mat hsvMat = new Mat();
-        private final Mat mask   = new Mat();
+        private final Mat grayMat = new Mat();
+        private final Mat mask    = new Mat();
 
         // Shared between the OpMode thread and the camera thread.
         volatile boolean showMask = false;
         volatile int     whitePixels = 0;
-        private volatile Scalar lower  = new Scalar(0, 0, 0);
-        private volatile Scalar upper  = new Scalar(180, 255, 255);
-        private volatile double[] sample = {0, 0, 0};
+        private volatile int lower  = 200;
+        private volatile int upper  = 255;
+        private volatile double sample = 0;
 
-        void setRange(int[] hsv) {
-            lower = new Scalar(hsv[0], hsv[2], hsv[4]);
-            upper = new Scalar(hsv[1], hsv[3], hsv[5]);
+        void setRange(int[] brightness) {
+            lower = brightness[0];
+            upper = brightness[1];
         }
 
-        double[] getSample() { return sample.clone(); }
+        double getSample() { return sample; }
 
         @Override
         public void init(int width, int height, CameraCalibration calibration) { }
 
         @Override
         public Object processFrame(Mat frame, long captureTimeNanos) {
-            Imgproc.cvtColor(frame, hsvMat, Imgproc.COLOR_RGB2HSV);
+            Imgproc.cvtColor(frame, grayMat, Imgproc.COLOR_RGB2GRAY);
 
             // Sample the green box (always, in either view).
             int bx = frame.cols() / 2 - BOX_SIZE / 2;
             int by = frame.rows() / 2 - BOX_SIZE / 2;
-            Mat region = hsvMat.submat(new Rect(bx, by, BOX_SIZE, BOX_SIZE));
-            Scalar mean = Core.mean(region);
+            Mat region = grayMat.submat(new Rect(bx, by, BOX_SIZE, BOX_SIZE));
+            sample = Core.mean(region).val[0];
             region.release();
-            sample = new double[]{mean.val[0], mean.val[1], mean.val[2]};
 
-            // Build the mask from the current range.
-            Core.inRange(hsvMat, lower, upper, mask);
+            // Build the mask from the current brightness range.
+            Core.inRange(grayMat, new Scalar(lower), new Scalar(upper), mask);
             whitePixels = Core.countNonZero(mask);
 
             if (showMask) {

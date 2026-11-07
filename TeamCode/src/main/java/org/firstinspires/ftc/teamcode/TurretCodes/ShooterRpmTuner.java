@@ -14,18 +14,18 @@ public class ShooterRpmTuner extends LinearOpMode {
     private static final double NATIVE_FULL    = 32767.0; // REV Hub internal output ceiling
  
     private DcMotorEx ls;
-    private DcMotorEx rs;
+//    private DcMotorEx rs;
  
     @Override
     public void runOpMode() {
         ls = hardwareMap.get(DcMotorEx.class, "ls");
-        rs = hardwareMap.get(DcMotorEx.class, "rs");
+
  
         // Stacking configuration: both spin the same physical direction to feed the shooter
         ls.setDirection(DcMotor.Direction.FORWARD);
-        rs.setDirection(DcMotor.Direction.REVERSE);
+//        rs.setDirection(DcMotor.Direction.REVERSE);
  
-        for (DcMotorEx m : new DcMotorEx[]{ls, rs}) {
+        for (DcMotorEx m : new DcMotorEx[]{ls}) {
             m.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
             m.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT); // Let them coast safely
             m.setVelocity(0);
@@ -43,7 +43,7 @@ public class ShooterRpmTuner extends LinearOpMode {
  
         // 1. Run open-loop at 85% power to find maximum physical limits under load
         ls.setPower(TEST_POWER);
-        rs.setPower(TEST_POWER);
+//        rs.setPower(TEST_POWER);
  
         double maxTpsLeft = 0;
         double maxTpsRight = 0;
@@ -51,20 +51,20 @@ public class ShooterRpmTuner extends LinearOpMode {
  
         while (opModeIsActive() && (System.currentTimeMillis() - startTime < RUN_DURATION_MS)) {
             maxTpsLeft = Math.max(maxTpsLeft, Math.abs(ls.getVelocity()));
-            maxTpsRight = Math.max(maxTpsRight, Math.abs(rs.getVelocity()));
+//            maxTpsRight = Math.max(maxTpsRight, Math.abs(rs.getVelocity()));
  
             // Convert live encoder readings to real-time Wheel RPM for display
             double liveWheelRpmLeft = (Math.abs(ls.getVelocity()) * 60.0 / 28.0) * 1.5;
-            double liveWheelRpmRight = (Math.abs(rs.getVelocity()) * 60.0 / 28.0) * 1.5;
+//            double liveWheelRpmRight = (Math.abs(rs.getVelocity()) * 60.0 / 28.0) * 1.5;
  
             telemetry.addData("Left Live Wheel RPM", "%.1f", liveWheelRpmLeft);
-            telemetry.addData("Right Live Wheel RPM", "%.1f", liveWheelRpmRight);
+//            telemetry.addData("Right Live Wheel RPM", "%.1f", liveWheelRpmRight);
             telemetry.update();
         }
  
         // 2. Cut power safely and let the heavy mass coast down
         ls.setPower(0);
-        rs.setPower(0);
+//        rs.setPower(0);
  
         // 3. Synthesize the clean, mathematically rigorous Feedforward (F) gains per motor
         //    F maps a target velocity (ticks/sec) to the raw power command (-32767..32767)

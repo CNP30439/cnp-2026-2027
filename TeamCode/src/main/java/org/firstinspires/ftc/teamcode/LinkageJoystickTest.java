@@ -24,11 +24,13 @@ package org.firstinspires.ftc.teamcode;
 //    drift out of sync.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.Servo;
 
 @TeleOp(name = "LinkageJoystickTest", group = "Test")
+@Disabled
 public class LinkageJoystickTest extends OpMode {
 
     private Servo linkageLeft, linkageRight;

@@ -35,11 +35,13 @@ package org.firstinspires.ftc.teamcode;
 //    so tapping dpad up/down/left/right gives repeatable, precise steps.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.Servo;
 
 @TeleOp(name = "ServoJoystickTest", group = "Test")
+@Disabled
 public class ServoJoystickTest extends OpMode {
 
     private Servo servo;
