@@ -10,10 +10,10 @@ import com.qualcomm.robotcore.hardware.PIDFCoefficients;
 @TeleOp (name = "FlywheelTuner", group = "TeleOp")
 public class FlywheelTuner extends OpMode {
     public DcMotorEx ls;
-    public DcMotorEx rs;
+
 
     double F = 12.84;   // or your measured value
-    double P = 71.5;
+    double P = 0;
 
     double highVelocity = 4300 / 1.5 * 28.0 / 60.0;  // ~1338 ticks/s  6814 rpm max
     double lowVelocity  = 2600 / 1.5 * 28.0 / 60.0;  // ~809 ticks/s
@@ -32,15 +32,15 @@ public class FlywheelTuner extends OpMode {
     @Override
     public void init() {
         ls = hardwareMap.get(DcMotorEx.class,"ls");
-        rs = hardwareMap.get(DcMotorEx.class,"rs");
+
         ls.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
-        rs.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+
         ls.setDirection(DcMotorSimple.Direction.FORWARD);
-        rs.setDirection(DcMotorSimple.Direction.REVERSE);
+
  
         PIDFCoefficients pidfCoefficients = new PIDFCoefficients(P,0,0,F);
         ls.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER,pidfCoefficients);
-        rs.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER,pidfCoefficients);
+
         telemetry.addLine("Init complete");
  
  
@@ -78,21 +78,20 @@ public class FlywheelTuner extends OpMode {
  
         PIDFCoefficients pidfCoefficients = new PIDFCoefficients(P,0,0,F);
         ls.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER,pidfCoefficients);
-        rs.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER,pidfCoefficients);
- 
+
         ls.setVelocity(curTargetVelocity);
-        rs.setVelocity(curTargetVelocity);
+
  
         double curVelocity = ls.getVelocity();
-        double curVelocity2 = -rs.getVelocity();
+
         double error = curTargetVelocity - curVelocity;
-        double error2 = curTargetVelocity - curVelocity2;
+
  
         telemetry.addData("Target Velocity", curTargetVelocity);
         telemetry.addData("Current Velocity", "%.2f", curVelocity);
-        telemetry.addData("Current Velocity2", "%.2f", curVelocity2);
+
         telemetry.addData("Error", "%.2f", error);
-        telemetry.addData("Error2", "%.2f", error2);
+
         telemetry.addLine("--------------------------------");
         telemetry.addData("Tuning P", "%.4f (D-Pad U/D)", P);
         telemetry.addData("Tuning F", "%.4f (D-Pad L/R)", F);

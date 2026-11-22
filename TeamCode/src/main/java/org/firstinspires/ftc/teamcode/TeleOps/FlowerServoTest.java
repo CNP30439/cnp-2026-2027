@@ -2,83 +2,79 @@ package org.firstinspires.ftc.teamcode.TeleOps;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // FlowerServoTest.java — test OpMode for the two flower servos.
-// Both servos start at 0 and always get the SAME position.
+// Both servos always get the SAME position. Starts at FLOWER_DOWN (0.0).
 //
-// CONTROLS (gamepad 1)
-//   dpad up   (hold) = move both servos up   (position increases)
-//   dpad down (hold) = move both servos down (position decreases)
-//   dpad right (press) = nudge up by FINE_STEP     dpad left (press) = nudge down by FINE_STEP
+// CONTROLS (gamepad 1) — each press moves once
+//   dpad up    = up   by STEP
+//   dpad down  = down by STEP
+//   dpad right = up   by FINE_STEP
+//   dpad left  = down by FINE_STEP
 //
-// HARDWARE: servos "flowerleft" and "flowerright" (change the names below to match the Robot Configuration).
-// If the two servos move in opposite directions, flip REVERSE_RIGHT / REVERSE_LEFT.
-// Read the final position from telemetry and put it in your real code.
+// HARDWARE: "linkageright" (FORWARD) and "linkageleft" (REVERSED).
+// Read the position from telemetry and put it in your real code.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import com.qualcomm.robotcore.eventloop.opmode.Disabled;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.Servo;
-import com.qualcomm.robotcore.util.ElapsedTime;
 
-@TeleOp(name = "FlowerServoTest", group = "Test")
-@Disabled
+@TeleOp(name = "Flower Servo Test", group = "Test")
 public class FlowerServoTest extends OpMode {
 
-    private static final String LEFT_NAME = "linkageright";
-    private static final String RIGHT_NAME = "linkageleft";
-    private static final boolean REVERSE_LEFT = false;
-    private static final boolean REVERSE_RIGHT = true; // mirrored servos usually need one reversed
+    private static final String FLOWER_A_NAME = "linkageright"; // FORWARD
+    private static final String FLOWER_B_NAME = "linkageleft";  // REVERSED
+    private static final double FLOWER_DOWN = 0.4;
+    private static final double FLOWER_UP = 0.4;
 
-    private static final double START_POSITION = 0.7;
-    private static final double SPEED_PER_SEC = 0.1; // position change per second while dpad up/down is held
-    private static final double FINE_STEP = 0.01;    // dpad left/right press
+    private static final double STEP = 0.1;      // per dpad up/down press
+    private static final double FINE_STEP = 0.01; // per dpad right/left press
 
-    private Servo left, right;
-    private double position = START_POSITION;
-    private boolean lastLeft, lastRight;
-    private final ElapsedTime dtTimer = new ElapsedTime();
+    private Servo flowerA;
+    private Servo flowerB;
+    private double position = FLOWER_DOWN;
+    private boolean lastUp, lastDown, lastRight, lastLeft;
 
     private void apply() {
         position = Math.max(0.0, Math.min(1.0, position));
-        left.setPosition(position);
-        right.setPosition(position);
+        flowerA.setPosition(position);
+        flowerB.setPosition(position);
     }
 
     @Override
     public void init() {
-        left = hardwareMap.get(Servo.class, LEFT_NAME);
-        right = hardwareMap.get(Servo.class, RIGHT_NAME);
-        left.setDirection(REVERSE_LEFT ? Servo.Direction.REVERSE : Servo.Direction.FORWARD);
-        right.setDirection(REVERSE_RIGHT ? Servo.Direction.REVERSE : Servo.Direction.FORWARD);
-        position = START_POSITION;
+        flowerA = hardwareMap.get(Servo.class, FLOWER_A_NAME);
+        flowerB = hardwareMap.get(Servo.class, FLOWER_B_NAME);
+
+        flowerA.setDirection(Servo.Direction.FORWARD);
+        flowerB.setDirection(Servo.Direction.REVERSE);
+
+        position = FLOWER_DOWN;
         apply();
-        telemetry.addLine("Both servos set to " + START_POSITION + ". Press PLAY, then dpad up / down.");
+        telemetry.addData("Start position", "%.3f", position);
+        telemetry.addLine("Press PLAY, then use the dpad.");
         telemetry.update();
     }
 
     @Override
-    public void start() {
-        dtTimer.reset();
-    }
-
-    @Override
     public void loop() {
-        double dt = dtTimer.seconds();
-        dtTimer.reset();
+        boolean up = gamepad1.dpad_up, down = gamepad1.dpad_down;
+        boolean right = gamepad1.dpad_right, left = gamepad1.dpad_left;
 
-        if (gamepad1.dpad_up) position += SPEED_PER_SEC * dt;
-        if (gamepad1.dpad_down) position -= SPEED_PER_SEC * dt;
+        if (up && !lastUp)       position += STEP;
+        if (down && !lastDown)   position -= STEP;
+        if (right && !lastRight) position += FINE_STEP;
+        if (left && !lastLeft)   position -= FINE_STEP;
 
-        boolean dr = gamepad1.dpad_right, dl = gamepad1.dpad_left;
-        if (dr && !lastRight) position += FINE_STEP;
-        if (dl && !lastLeft) position -= FINE_STEP;
-        lastRight = dr;
-        lastLeft = dl;
+        lastUp = up;
+        lastDown = down;
+        lastRight = right;
+        lastLeft = left;
 
         apply();
 
         telemetry.addData("Position (both servos)", "%.3f", position);
-        telemetry.addLine("dpad up/down = move (hold) | dpad left/right = fine nudge");
+        telemetry.addData("FLOWER_DOWN / FLOWER_UP", "%.2f / %.2f", FLOWER_DOWN, FLOWER_UP);
+        telemetry.addLine("dpad up/down = ±0.05 | dpad right/left = ±0.01");
         telemetry.update();
     }
 }
